@@ -14,3 +14,7 @@ dist/
 *.egg-info/
 .pytest_cache/
 .tox/
+
+# zig build artifacts
+zig-out/
+.zig-cache/
