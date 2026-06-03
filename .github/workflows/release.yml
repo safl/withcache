@@ -6,8 +6,8 @@ on:
 permissions:
   contents: read
 
-# Publishing to PyPI is gated: the publish job `needs` build, which `needs`
-# both lint and test — so a release only ships if everything is green.
+# Everything is gated: publish/upload jobs `needs` the build jobs, which `needs`
+# lint+test — a release only ships if everything is green.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -32,7 +32,42 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
 
-  build:
+  # Platform wheels: one static musl binary per arch, tagged for BOTH glibc
+  # (manylinux) and musl (musllinux) — a static binary has no libc dep, so it
+  # runs under either. `pipx install fromcache` then gets the NATIVE shim.
+  wheels:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ztarget: x86_64-linux-musl, wtag: py3-none-manylinux_2_17_x86_64 }
+          - { ztarget: x86_64-linux-musl, wtag: py3-none-musllinux_1_2_x86_64 }
+          - { ztarget: aarch64-linux-musl, wtag: py3-none-manylinux_2_17_aarch64 }
+          - { ztarget: aarch64-linux-musl, wtag: py3-none-musllinux_1_2_aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+      # If 0.16.0 isn't yet a fetchable Zig release, pin to "master".
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - env:
+          FROMCACHE_ZIG_TARGET: ${{ matrix.ztarget }}
+          FROMCACHE_WHEEL_TAG: ${{ matrix.wtag }}
+        run: python -m build --wheel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.wtag }}
+          path: dist/*.whl
+
+  # The universal fallback wheel (Python launchers) + the sdist. Built without
+  # zig, so the hook emits the pure py3-none-any wheel.
+  sdist:
     needs: [lint, test]
     runs-on: ubuntu-latest
     steps:
@@ -44,11 +79,11 @@ jobs:
       - run: python -m build
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-pure
           path: dist/*
 
   publish:
-    needs: build
+    needs: [wheels, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -56,25 +91,24 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  # Cross-compile the native shim to static, dependency-free binaries and attach
-  # them to the GitHub Release. One binary serves both tools (dispatch on argv[0]);
-  # download, chmod +x, and symlink it as `curl` / `wget` on the client's PATH.
-  shim:
+  # Also attach the raw static binaries to the GitHub Release, for boxes with
+  # no Python/pip (minimal/distroless images). One binary serves both tools.
+  binaries:
     needs: [lint, test]
     runs-on: ubuntu-latest
     permissions:
-      contents: write # upload release assets
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         target: [x86_64-linux-musl, aarch64-linux-musl]
     steps:
       - uses: actions/checkout@v4
-      # If 0.16.0 isn't yet a fetchable Zig release, pin to "master".
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0

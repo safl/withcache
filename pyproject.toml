@@ -25,15 +25,20 @@ dependencies = []  # stdlib only, by design
 Homepage = "https://github.com/safl/fromcache"
 
 [project.scripts]
-curlfromcache = "fromcache.curlfromcache:main"
-wgetfromcache = "fromcache.wgetfromcache:main"
+# curlfromcache / wgetfromcache are NOT console-scripts: the build hook ships
+# them as the native binary (platform wheels) or Python launchers (pure wheel),
+# so the command name is one thing whichever way you installed.
 fromcache-server = "fromcache.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fromcache"]
 
+# Ship the shim (native binary or Python launcher) — see hatch_build.py.
+[tool.hatch.build.targets.wheel.hooks.custom]
+
 [tool.hatch.build.targets.sdist]
-include = ["src/fromcache", "README.md", "LICENSE", "deploy", "tests"]
+# shim/ is included so an sdist build can compile (or fall back for) the shim.
+include = ["src/fromcache", "shim", "README.md", "LICENSE", "deploy", "tests"]
 
 [tool.ruff]
 line-length = 100
