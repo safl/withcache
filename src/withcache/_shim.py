@@ -1,4 +1,4 @@
-"""Shared core for the fromcache download-tool shims (curlfromcache, wgetfromcache).
+"""Shared core for the withcache download-tool shims (curlwithcache, wgetwithcache).
 
 Every shim does the same three things — find the URL in the wrapped tool's
 arguments, ask the cache-host whether it has that artifact, and on a hit
@@ -26,7 +26,7 @@ _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 
 
 def cache_base(server: str) -> str:
-    """Accept 'host', 'host:3000', or 'http://fromcache-server:3000'."""
+    """Accept 'host', 'host:3000', or 'http://withcache-server:3000'."""
     server = server.strip().rstrip("/")
     if "://" not in server:
         server = "http://" + server
@@ -34,8 +34,8 @@ def cache_base(server: str) -> str:
 
 
 def env_server(tool: str) -> str | None:
-    """Per-tool override (e.g. CURLFROMCACHE_SERVER) wins, else FROMCACHE_SERVER."""
-    return os.environ.get(tool.upper() + "FROMCACHE_SERVER") or os.environ.get("FROMCACHE_SERVER")
+    """Per-tool override (e.g. CURLWITHCACHE_SERVER) wins, else WITHCACHE_SERVER."""
+    return os.environ.get(tool.upper() + "WITHCACHE_SERVER") or os.environ.get("WITHCACHE_SERVER")
 
 
 def find_real(name: str) -> str | None:
@@ -124,11 +124,11 @@ def run(tool: str, probe, argv=None):
     real, final = plan(tool, probe, argv)
     if real is None:
         sys.stderr.write(
-            f"{tool}fromcache: no real {tool} found on PATH (set $REAL_{tool.upper()})\n"
+            f"{tool}withcache: no real {tool} found on PATH (set $REAL_{tool.upper()})\n"
         )
         sys.exit(127)
     try:
         os.execv(real, [real, *final])  # become the tool: exit code, signals, I/O
     except OSError as e:
-        sys.stderr.write(f"{tool}fromcache: cannot exec {real}: {e}\n")
+        sys.stderr.write(f"{tool}withcache: cannot exec {real}: {e}\n")
         sys.exit(127)

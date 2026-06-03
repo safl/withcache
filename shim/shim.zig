@@ -1,8 +1,8 @@
-//! curlfromcache / wgetfromcache — native shim, the Zig sibling of the Python
-//! shims (see ../src/fromcache/_shim.py, the test oracle this must match).
+//! curlwithcache / wgetwithcache — native shim, the Zig sibling of the Python
+//! shims (see ../src/withcache/_shim.py, the test oracle this must match).
 //!
 //! One busybox-style binary: it inspects argv[0] ("curl" or "wget") to decide
-//! which real tool to wrap. With FROMCACHE_SERVER set it finds the URL, probes
+//! which real tool to wrap. With WITHCACHE_SERVER set it finds the URL, probes
 //! the cache (using the same tool), and on a hit re-points only the URL at
 //! <server>/b/<base64(origin)>/<basename> before exec'ing the real tool — so
 //! all flags keep working and the saved file keeps the artifact's name. On a
@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const vector = init.args.vector; // []const [*:0]const u8
     const arg0 = std.mem.span(vector[0]);
-    // "contains wget" so both `wget` and `wgetfromcache` (the installed name) resolve.
+    // "contains wget" so both `wget` and `wgetwithcache` (the installed name) resolve.
     const base = std.fs.path.basename(arg0);
     const tool: Tool = if (std.mem.indexOf(u8, base, "wget") != null) .wget else .curl;
     const tool_name = @tagName(tool);
@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const real = (try findReal(a, io, tool_name)) orelse {
         std.debug.print(
-            "{s}fromcache: no real {s} found on PATH (set $REAL_{s})\n",
+            "{s}withcache: no real {s} found on PATH (set $REAL_{s})\n",
             .{ tool_name, tool_name, tool_name },
         );
         std.process.exit(127);
@@ -74,8 +74,8 @@ fn upperAscii(a: std.mem.Allocator, s: []const u8) []const u8 {
 }
 
 fn envServer(a: std.mem.Allocator, tool_name: []const u8) ?[]const u8 {
-    const key = std.fmt.allocPrint(a, "{s}FROMCACHE_SERVER", .{upperAscii(a, tool_name)}) catch return null;
-    return getEnv(a, key) orelse getEnv(a, "FROMCACHE_SERVER");
+    const key = std.fmt.allocPrint(a, "{s}WITHCACHE_SERVER", .{upperAscii(a, tool_name)}) catch return null;
+    return getEnv(a, key) orelse getEnv(a, "WITHCACHE_SERVER");
 }
 
 // --- url handling ----------------------------------------------------------
@@ -197,6 +197,6 @@ fn execReal(a: std.mem.Allocator, real: []const u8, args: []const [*:0]const u8)
     for (args, 0..) |arg, i| argvz[1 + i] = arg;
     const envp: [*:null]const ?[*:0]const u8 = @ptrCast(c.environ);
     _ = c.execve(realz.ptr, argvz.ptr, envp);
-    std.debug.print("fromcache shim: cannot exec {s}\n", .{real});
+    std.debug.print("withcache shim: cannot exec {s}\n", .{real});
     std.process.exit(127);
 }

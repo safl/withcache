@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fromcache cache-host — an operator-curated artifact cache.
+"""withcache cache-host — an operator-curated artifact cache.
 
 Stdlib only (http.server + sqlite3 + urllib). Serves cached blobs keyed by
 their origin URL. A cache miss is *not* fetched automatically: it is recorded
@@ -13,9 +13,9 @@ Clients never write to it.
 Auth (modelled on bty's single-tenant approach, minus PAM): the read path
 (`/blob`, `/healthz`) is open so clients never log in; the operator surface
 (`/` and `/admin/*`) is gated behind a server-signed session cookie. Login at
-`POST /ui/login` checks the password in $FROMCACHE_ADMIN_PASSWORD and flips the
+`POST /ui/login` checks the password in $WITHCACHE_ADMIN_PASSWORD and flips the
 cookie to authenticated; the cookie is HMAC-signed with a secret read from
-$FROMCACHE_SESSION_SECRET or persisted to ``<data-dir>/session-secret``. If no
+$WITHCACHE_SESSION_SECRET or persisted to ``<data-dir>/session-secret``. If no
 admin password is set, the operator UI is left open (with a startup warning).
 """
 
@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 CHUNK = 64 * 1024
-USER_AGENT = "fromcache-cache/0.1"
+USER_AGENT = "withcache-cache/0.1"
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME_TYPES = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8"}
 _DB_WRITE_LOCK = threading.Lock()
@@ -72,10 +72,10 @@ def _b64d(s: str) -> bytes:
 
 
 def resolve_secret(data_dir: str) -> bytes:
-    """$FROMCACHE_SESSION_SECRET if set + non-empty, else a random key persisted
+    """$WITHCACHE_SESSION_SECRET if set + non-empty, else a random key persisted
     to <data-dir>/session-secret so cookies survive restarts. Mirrors bty's
     _resolve_secret_key: a blank env value must NOT silently weaken signing."""
-    env = (os.environ.get("FROMCACHE_SESSION_SECRET") or "").strip()
+    env = (os.environ.get("WITHCACHE_SESSION_SECRET") or "").strip()
     if env:
         return env.encode("utf-8")
     path = os.path.join(data_dir, "session-secret")
@@ -92,7 +92,7 @@ def resolve_secret(data_dir: str) -> bytes:
 
 
 class Auth:
-    COOKIE = "fromcache-token"
+    COOKIE = "withcache-token"
     MAX_AGE = 7 * 24 * 3600  # cookie lifetime, seconds
 
     def __init__(self, secret: bytes, password: str | None):
@@ -421,7 +421,7 @@ def _set_progress(job: Job, done: int, total: int | None):
 # HTTP handler
 # --------------------------------------------------------------------------
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "fromcache/0.1"
+    server_version = "withcache/0.1"
     protocol_version = "HTTP/1.1"
 
     @property
@@ -605,7 +605,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", row["content_type"] or "application/octet-stream")
         self.send_header("Content-Length", str(row["size"]))
-        self.send_header("X-Fromcache-Sha256", row["sha256"])
+        self.send_header("X-Withcache-Sha256", row["sha256"])
         self.end_headers()
         if head_only:
             return  # the shim's HEAD probe — not a served download, so don't count it
@@ -687,10 +687,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def render_login(self, error: str = "") -> str:
         err = f'<div class="err">{html.escape(error)}</div>' if error else ""
-        return f"""{self._head("fromcache — login")}
+        return f"""{self._head("withcache — login")}
 <body><main class="container">
   <article style="max-width: 24rem; margin: 4rem auto;">
-    <hgroup><h2>fromcache</h2><p>operator login</p></hgroup>
+    <hgroup><h2>withcache</h2><p>operator login</p></hgroup>
     {err}
     <form method="post" action="/ui/login">
       <input type="password" name="password" placeholder="Admin password" autofocus required>
@@ -707,10 +707,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.auth.enabled
             else ""
         )
-        return f"""{self._head("fromcache cache-host")}
+        return f"""{self._head("withcache cache-host")}
 <body><main class="container">
   <nav>
-    <ul><li><strong>fromcache</strong> &nbsp;<small>cache-host</small></li></ul>
+    <ul><li><strong>withcache</strong> &nbsp;<small>cache-host</small></li></ul>
     <ul>
       <li><progress id="spin" class="htmx-indicator"></progress></li>
       {logout}
@@ -850,7 +850,7 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="fromcache cache-host")
+    ap = argparse.ArgumentParser(description="withcache cache-host")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=3000)
     ap.add_argument("--data-dir", default="./data")
@@ -872,7 +872,7 @@ def main():
     args = ap.parse_args()
 
     store = Store(args.data_dir, keep_query=args.keep_query)
-    auth = Auth(resolve_secret(store.data_dir), os.environ.get("FROMCACHE_ADMIN_PASSWORD"))
+    auth = Auth(resolve_secret(store.data_dir), os.environ.get("WITHCACHE_ADMIN_PASSWORD"))
     mgr = DownloadManager(store, workers=args.workers)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
@@ -881,14 +881,14 @@ def main():
     httpd.mgr = mgr  # type: ignore[attr-defined]
     httpd.auto_fetch = not args.curate  # type: ignore[attr-defined]
     print(
-        f"fromcache cache-host on http://{args.host}:{args.port}  "
+        f"withcache cache-host on http://{args.host}:{args.port}  "
         f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "
         f"mode={'curate' if args.curate else 'auto-fetch'})",
         flush=True,
     )
     if not auth.enabled:
         print(
-            "WARNING: FROMCACHE_ADMIN_PASSWORD not set — operator UI is UNAUTHENTICATED.",
+            "WARNING: WITHCACHE_ADMIN_PASSWORD not set — operator UI is UNAUTHENTICATED.",
             flush=True,
         )
     try:

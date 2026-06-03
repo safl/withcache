@@ -3,7 +3,7 @@
 # Bump pins:     pre-commit autoupdate
 
 # Leave vendored third-party assets byte-identical to upstream.
-exclude: '^src/fromcache/static/'
+exclude: '^src/withcache/static/'
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit

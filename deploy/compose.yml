@@ -1,23 +1,23 @@
 # Single-host deploy (run from the repo root):
-#   FROMCACHE_ADMIN_PASSWORD=secret podman compose -f deploy/compose.yml up -d
+#   WITHCACHE_ADMIN_PASSWORD=secret podman compose -f deploy/compose.yml up -d
 # (or: docker compose -f deploy/compose.yml up -d)
 services:
   cache-host:
     build:
       context: ..
       dockerfile: deploy/Containerfile
-    image: fromcache:latest
-    container_name: fromcache
+    image: withcache:latest
+    container_name: withcache
     ports:
       - "3000:3000"
     environment:
       # Protect the operator UI. Unset => UI is open (a warning is logged).
-      - FROMCACHE_ADMIN_PASSWORD=${FROMCACHE_ADMIN_PASSWORD:-}
+      - WITHCACHE_ADMIN_PASSWORD=${WITHCACHE_ADMIN_PASSWORD:-}
       # Optional: pin the session-signing key (else persisted under /data).
-      # - FROMCACHE_SESSION_SECRET=${FROMCACHE_SESSION_SECRET:-}
+      # - WITHCACHE_SESSION_SECRET=${WITHCACHE_SESSION_SECRET:-}
     volumes:
-      - fromcache-data:/data
+      - withcache-data:/data
     restart: unless-stopped
 
 volumes:
-  fromcache-data:
+  withcache-data:

@@ -1,4 +1,4 @@
-"""Stdlib-only tests for fromcache. Run with:  python -m unittest -v
+"""Stdlib-only tests for withcache. Run with:  python -m unittest -v
 
 No third-party test deps; src/ is put on the path so the package imports
 without an install.
@@ -19,7 +19,7 @@ import base64  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
-from fromcache import _shim, curlfromcache, server, wgetfromcache  # noqa: E402
+from withcache import _shim, curlwithcache, server, wgetwithcache  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -94,7 +94,7 @@ class TestStoreKeys(unittest.TestCase):
 # --------------------------------------------------------------------------
 # Integration: pull a blob from a local origin, then read it back
 # --------------------------------------------------------------------------
-PAYLOAD = b"hello-fromcache-" * 1000  # 16 KiB
+PAYLOAD = b"hello-withcache-" * 1000  # 16 KiB
 
 
 class _Origin(http.server.BaseHTTPRequestHandler):
@@ -210,12 +210,12 @@ class TestShim(unittest.TestCase):
     def test_env_server_override_precedence(self):
         saved = {
             k: os.environ.get(k)
-            for k in ("FROMCACHE_SERVER", "CURLFROMCACHE_SERVER", "WGETFROMCACHE_SERVER")
+            for k in ("WITHCACHE_SERVER", "CURLWITHCACHE_SERVER", "WGETWITHCACHE_SERVER")
         }
         try:
-            os.environ["FROMCACHE_SERVER"] = "http://shared:3000"
-            os.environ["CURLFROMCACHE_SERVER"] = "http://curl-only:3000"
-            os.environ.pop("WGETFROMCACHE_SERVER", None)
+            os.environ["WITHCACHE_SERVER"] = "http://shared:3000"
+            os.environ["CURLWITHCACHE_SERVER"] = "http://curl-only:3000"
+            os.environ.pop("WGETWITHCACHE_SERVER", None)
             self.assertEqual(_shim.env_server("curl"), "http://curl-only:3000")
             self.assertEqual(_shim.env_server("wget"), "http://shared:3000")
         finally:
@@ -256,17 +256,17 @@ class TestShimPlan(unittest.TestCase):
             f.write("#!/bin/sh\n")
         os.chmod(self.dummy, 0o755)
         self._saved = {
-            k: os.environ.get(k) for k in ("REAL_CURL", "FROMCACHE_SERVER", "CURLFROMCACHE_SERVER")
+            k: os.environ.get(k) for k in ("REAL_CURL", "WITHCACHE_SERVER", "CURLWITHCACHE_SERVER")
         }
         os.environ["REAL_CURL"] = self.dummy
-        os.environ.pop("CURLFROMCACHE_SERVER", None)
+        os.environ.pop("CURLWITHCACHE_SERVER", None)
 
     def tearDown(self):
         for k, v in self._saved.items():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
     def test_hit_rewrites_only_the_url(self):
-        os.environ["FROMCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
         argv = ["-fsSL", "https://h/p/cuda.tar.gz", "-o", "out"]
         real, final = _shim.plan("curl", lambda r, u: True, argv)
         self.assertEqual(real, self.dummy)
@@ -275,19 +275,19 @@ class TestShimPlan(unittest.TestCase):
         self.assertTrue(final[1].endswith("/cuda.tar.gz"))
 
     def test_miss_leaves_argv_untouched(self):
-        os.environ["FROMCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
         argv = ["https://h/x", "-O"]
         _, final = _shim.plan("curl", lambda r, u: False, argv)
         self.assertEqual(final, argv)
 
     def test_unreachable_leaves_argv_untouched(self):
-        os.environ["FROMCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
         argv = ["https://h/x"]
         _, final = _shim.plan("curl", lambda r, u: None, argv)
         self.assertEqual(final, argv)
 
     def test_no_server_skips_probe_entirely(self):
-        os.environ.pop("FROMCACHE_SERVER", None)
+        os.environ.pop("WITHCACHE_SERVER", None)
         calls = []
         argv = ["https://h/x"]
         _, final = _shim.plan("curl", lambda r, u: calls.append(1) or True, argv)
@@ -308,7 +308,7 @@ class TestShimPlan(unittest.TestCase):
 # Real probe against an in-process cache (skipped where the tool is absent).
 # Validates the actual curl -I / wget --spider exit-code interpretation.
 # --------------------------------------------------------------------------
-def _start_fromcache(auto_fetch=False):
+def _start_withcache(auto_fetch=False):
     store = server.Store(tempfile.mkdtemp(), keep_query=False)
     httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     httpd.store = store
@@ -324,7 +324,7 @@ class TestProbeReal(unittest.TestCase):
         self.origin = socketserver.TCPServer(("127.0.0.1", 0), _Origin)
         threading.Thread(target=self.origin.serve_forever, daemon=True).start()
         self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/art.bin"
-        self.httpd, self.store = _start_fromcache()
+        self.httpd, self.store = _start_withcache()
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def tearDown(self):
@@ -340,11 +340,11 @@ class TestProbeReal(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("curl"), "curl not installed")
     def test_curl_probe(self):
-        self._check(curlfromcache.probe, shutil.which("curl"))
+        self._check(curlwithcache.probe, shutil.which("curl"))
 
     @unittest.skipUnless(shutil.which("wget"), "wget not installed")
     def test_wget_probe(self):
-        self._check(wgetfromcache.probe, shutil.which("wget"))
+        self._check(wgetwithcache.probe, shutil.which("wget"))
 
 
 # --------------------------------------------------------------------------
@@ -356,7 +356,7 @@ class TestHandlerCounters(unittest.TestCase):
         self.origin = socketserver.TCPServer(("127.0.0.1", 0), _Origin)
         threading.Thread(target=self.origin.serve_forever, daemon=True).start()
         self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/art.bin"
-        self.httpd, self.store = _start_fromcache()
+        self.httpd, self.store = _start_withcache()
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def tearDown(self):
@@ -402,7 +402,7 @@ class TestAutoFetchOnMiss(unittest.TestCase):
             urllib.request.urlopen(_shim.blob_url(base, self.origin_url))
 
     def test_miss_schedules_pull_by_default(self):
-        httpd, store = _start_fromcache(auto_fetch=True)
+        httpd, store = _start_withcache(auto_fetch=True)
         try:
             self._miss(httpd)
             # the miss enqueued a background pull, no operator needed
@@ -412,7 +412,7 @@ class TestAutoFetchOnMiss(unittest.TestCase):
             httpd.server_close()
 
     def test_curate_mode_records_miss_but_schedules_nothing(self):
-        httpd, store = _start_fromcache(auto_fetch=False)
+        httpd, store = _start_withcache(auto_fetch=False)
         try:
             self._miss(httpd)
             self.assertEqual(httpd.mgr.list(), [])  # nothing pulled without approval

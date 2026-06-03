@@ -8,7 +8,7 @@ name: release
 #
 # `workflow_dispatch` runs the build only (no release/publish) as a smoke test.
 #
-# First publish needs a one-time PyPI Trusted Publisher (project fromcache,
+# First publish needs a one-time PyPI Trusted Publisher (project withcache,
 # workflow release.yml, environment pypi) — no API token required.
 on:
   push:
@@ -33,13 +33,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${TAG#v}"
-          echo "Checking PyPI for fromcache==${version}..."
-          if curl -sfL "https://pypi.org/pypi/fromcache/json" \
+          echo "Checking PyPI for withcache==${version}..."
+          if curl -sfL "https://pypi.org/pypi/withcache/json" \
              | python3 -c "import sys, json; sys.exit(0 if '${version}' in json.load(sys.stdin)['releases'] else 1)"; then
-            echo "::error::PyPI already has fromcache==${version}. Bump the version, retag, and push."
+            echo "::error::PyPI already has withcache==${version}. Bump the version, retag, and push."
             exit 1
           fi
-          echo "OK: fromcache==${version} not on PyPI yet; release continues."
+          echo "OK: withcache==${version} not on PyPI yet; release continues."
 
   lint:
     needs: check-not-published
@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/fromcache
+      url: https://pypi.org/p/withcache
     permissions:
       id-token: write # OIDC for PyPI Trusted Publishing — no API token needed
     steps:

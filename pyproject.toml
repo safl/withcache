@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fromcache"
-dynamic = ["version"]  # single source of truth: src/fromcache/__init__.py:__version__
+name = "withcache"
+dynamic = ["version"]  # single source of truth: src/withcache/__init__.py:__version__
 description = "Operator-curated, URL-keyed artifact cache for a small lab (CUDA/ROCm/DOCA/firmware)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,26 +22,26 @@ classifiers = [
 dependencies = []  # stdlib only, by design
 
 [project.urls]
-Homepage = "https://github.com/safl/fromcache"
+Homepage = "https://github.com/safl/withcache"
 
 [project.scripts]
-# curlfromcache / wgetfromcache are NOT console-scripts: the build hook ships
+# curlwithcache / wgetwithcache are NOT console-scripts: the build hook ships
 # them as the native binary (platform wheels) or Python launchers (pure wheel),
 # so the command name is one thing whichever way you installed.
-fromcache-server = "fromcache.server:main"
+withcache-server = "withcache.server:main"
 
 [tool.hatch.version]
-path = "src/fromcache/__init__.py"  # the single source of truth
+path = "src/withcache/__init__.py"  # the single source of truth
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fromcache"]
+packages = ["src/withcache"]
 
 # Ship the shim (native binary or Python launcher) — see hatch_build.py.
 [tool.hatch.build.targets.wheel.hooks.custom]
 
 [tool.hatch.build.targets.sdist]
 # shim/ is included so an sdist build can compile (or fall back for) the shim.
-include = ["src/fromcache", "shim", "README.md", "LICENSE", "deploy", "tests"]
+include = ["src/withcache", "shim", "README.md", "LICENSE", "deploy", "tests"]
 
 [tool.ruff]
 line-length = 100
@@ -53,5 +53,5 @@ select = ["E", "F", "W", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 # tests and the shims deliberately import after a sys.path tweak / fallback
 "tests/*" = ["E402"]
-"src/fromcache/curlfromcache.py" = ["E402"]
-"src/fromcache/wgetfromcache.py" = ["E402"]
+"src/withcache/curlwithcache.py" = ["E402"]
+"src/withcache/wgetwithcache.py" = ["E402"]

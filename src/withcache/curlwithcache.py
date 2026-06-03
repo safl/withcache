@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""curlfromcache — a transparent caching shim for ``curl`` (part of fromcache).
+"""curlwithcache — a transparent caching shim for ``curl`` (part of withcache).
 
 Think "ccache for HTTP artifacts, without a proxy". Drop it on $PATH ahead of
-the real curl (typically as a ``curl`` symlink). If FROMCACHE_SERVER points at a
-fromcache cache-host and the artifact is cached there, the download is served
+the real curl (typically as a ``curl`` symlink). If WITHCACHE_SERVER points at a
+withcache cache-host and the artifact is cached there, the download is served
 from the cache; otherwise — server unset, not cached, or unreachable — your curl
 runs exactly as written. Existing scripts need no changes.
 
-    export FROMCACHE_SERVER=http://fromcache-server:3000
+    export WITHCACHE_SERVER=http://withcache-server:3000
     curl -fsSL https://the/origin/cuda.tar.gz -o cuda.tar.gz   # cache hit -> local
 
 It wraps the system curl, so all curl flags keep working; on a miss it hands
 your original arguments straight to the real curl. Set $REAL_CURL to pin the
-wrapped binary; CURLFROMCACHE_SERVER overrides FROMCACHE_SERVER for curl only.
+wrapped binary; CURLWITHCACHE_SERVER overrides WITHCACHE_SERVER for curl only.
 
 Stdlib only.
 """
@@ -22,10 +22,10 @@ import subprocess
 import sys
 
 try:
-    from fromcache import _shim
+    from withcache import _shim
 except ImportError:  # running the source file directly, uninstalled
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-    from fromcache import _shim
+    from withcache import _shim
 
 
 def probe(real_curl: str, url: str):

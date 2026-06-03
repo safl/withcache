@@ -2,7 +2,7 @@
 produce identical argv rewrites. This is what lets the Python implementation
 stay a trustworthy fallback — it can't silently drift from the binary.
 
-Skipped when the Zig binary isn't built (set FROMCACHE_SHIM or run `zig build`
+Skipped when the Zig binary isn't built (set WITHCACHE_SHIM or run `zig build`
 in ../shim). Run with:  python -m unittest -v
 """
 
@@ -15,10 +15,10 @@ import unittest
 HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
-from fromcache import _shim  # noqa: E402
+from withcache import _shim  # noqa: E402
 
 SHIM = os.environ.get(
-    "FROMCACHE_SHIM", os.path.join(HERE, "..", "shim", "zig-out", "bin", "fromcache-shim")
+    "WITHCACHE_SHIM", os.path.join(HERE, "..", "shim", "zig-out", "bin", "withcache-shim")
 )
 
 # Each case is run through both implementations, as both curl and wget, hit+miss.
@@ -57,18 +57,18 @@ class TestDifferential(unittest.TestCase):
         self._saved = {
             k: os.environ.get(k)
             for k in (
-                "FROMCACHE_SERVER",
+                "WITHCACHE_SERVER",
                 "REAL_CURL",
                 "REAL_WGET",
-                "CURLFROMCACHE_SERVER",
-                "WGETFROMCACHE_SERVER",
+                "CURLWITHCACHE_SERVER",
+                "WGETWITHCACHE_SERVER",
             )
         }
-        os.environ["FROMCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
         os.environ["REAL_CURL"] = self.fake_hit  # Python find_real just needs an exe
         os.environ["REAL_WGET"] = self.fake_hit
-        os.environ.pop("CURLFROMCACHE_SERVER", None)
-        os.environ.pop("WGETFROMCACHE_SERVER", None)
+        os.environ.pop("CURLWITHCACHE_SERVER", None)
+        os.environ.pop("WGETWITHCACHE_SERVER", None)
 
     def tearDown(self):
         for k, v in self._saved.items():

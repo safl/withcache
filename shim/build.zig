@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .strip = optimize != .Debug,
     });
-    const exe = b.addExecutable(.{ .name = "fromcache-shim", .root_module = mod });
+    const exe = b.addExecutable(.{ .name = "withcache-shim", .root_module = mod });
     if (want_static) exe.linkage = .static;
     b.installArtifact(exe);
 }
