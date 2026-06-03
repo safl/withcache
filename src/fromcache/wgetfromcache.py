@@ -34,7 +34,9 @@ def probe(real_wget: str, url: str):
     try:
         r = subprocess.run(
             [real_wget, "--spider", "-q", "-T", str(_shim.PROBE_TIMEOUT), "-t", "1", url],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except OSError:
         return None

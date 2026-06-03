@@ -43,8 +43,7 @@ from datetime import datetime, timezone
 CHUNK = 64 * 1024
 USER_AGENT = "fromcache-cache/0.1"
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-MIME_TYPES = {".css": "text/css; charset=utf-8",
-              ".js": "application/javascript; charset=utf-8"}
+MIME_TYPES = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8"}
 _DB_WRITE_LOCK = threading.Lock()
 
 
@@ -199,15 +198,11 @@ class Store:
 
     def list_blobs(self):
         with self.conn() as c:
-            return c.execute(
-                "SELECT * FROM blobs ORDER BY fetched_at DESC"
-            ).fetchall()
+            return c.execute("SELECT * FROM blobs ORDER BY fetched_at DESC").fetchall()
 
     def list_misses(self):
         with self.conn() as c:
-            return c.execute(
-                "SELECT * FROM misses ORDER BY last_seen DESC"
-            ).fetchall()
+            return c.execute("SELECT * FROM misses ORDER BY last_seen DESC").fetchall()
 
     def counts(self):
         with self.conn() as c:
@@ -326,7 +321,7 @@ class DownloadManager:
         self._jobs: dict[int, Job] = {}
         self._active: dict[str, int] = {}  # url -> job id, while queued/running
         self._lock = threading.Lock()
-        self._q: "queue.Queue[int]" = queue.Queue()
+        self._q: queue.Queue[int] = queue.Queue()
         self._ids = itertools.count(1)
         for _ in range(max(1, workers)):
             threading.Thread(target=self._worker, daemon=True).start()
@@ -561,7 +556,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _blob_origin(self, parsed) -> str:
         """Origin URL from either /blob?url=<origin> or /b/<base64>/<name>."""
         if parsed.path.startswith("/b/"):
-            token = parsed.path[len("/b/"):].split("/", 1)[0]
+            token = parsed.path[len("/b/") :].split("/", 1)[0]
             try:
                 return base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8")
             except (ValueError, UnicodeDecodeError):
@@ -629,8 +624,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # -- HTML --------------------------------------------------------------
     STATUS_COLORS = {
-        "queued": "#888", "running": "var(--pico-primary, #0172ad)",
-        "completed": "#2e7d32", "failed": "#c0392b", "cancelled": "#888",
+        "queued": "#888",
+        "running": "var(--pico-primary, #0172ad)",
+        "completed": "#2e7d32",
+        "failed": "#c0392b",
+        "cancelled": "#888",
     }
 
     def _head(self, title: str) -> str:
@@ -677,7 +675,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '<li><form method="post" action="/ui/logout" style="margin:0">'
             '<button type="submit" class="secondary outline" '
             'style="width:auto;padding:.3rem .8rem">Log out</button></form></li>'
-            if self.auth.enabled else ""
+            if self.auth.enabled
+            else ""
         )
         return f"""{self._head("fromcache cache-host")}
 <body><main class="container">
@@ -709,16 +708,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         misses = self.store.list_misses()
         blobs = self.store.list_blobs()
 
-        job_rows = "".join(self._job_row(j) for j in jobs) or \
-            '<tr><td colspan="4"><em>No downloads yet.</em></td></tr>'
+        job_rows = (
+            "".join(self._job_row(j) for j in jobs)
+            or '<tr><td colspan="4"><em>No downloads yet.</em></td></tr>'
+        )
 
-        miss_rows = "".join(
-            f"""<tr>
+        miss_rows = (
+            "".join(
+                f"""<tr>
                 <td class="url">{html.escape(m["url"])}</td>
                 <td class="num">{m["count"]}</td>
                 <td><small>{html.escape(m["last_seen"])}</small></td>
                 <td>
-                  <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML" hx-indicator="#spin">
+                  <form hx-post="/admin/fetch" hx-target="#dash"
+                        hx-swap="innerHTML" hx-indicator="#spin">
                     <input type="hidden" name="url" value="{html.escape(m["url"], quote=True)}">
                     <button type="submit">Download</button>
                   </form>
@@ -728,18 +731,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                   </form>
                 </td>
             </tr>"""
-            for m in misses
-        ) or '<tr><td colspan="4"><em>No misses recorded.</em></td></tr>'
+                for m in misses
+            )
+            or '<tr><td colspan="4"><em>No misses recorded.</em></td></tr>'
+        )
 
-        blob_rows = "".join(
-            f"""<tr>
+        blob_rows = (
+            "".join(
+                f"""<tr>
                 <td class="url">{html.escape(b["url"])}</td>
                 <td>{human_size(b["size"])}</td>
                 <td class="mono">{html.escape(b["sha256"][:12])}…</td>
                 <td><small>{html.escape(b["fetched_at"])}</small></td>
             </tr>"""
-            for b in blobs
-        ) or '<tr><td colspan="4"><em>Cache is empty.</em></td></tr>'
+                for b in blobs
+            )
+            or '<tr><td colspan="4"><em>Cache is empty.</em></td></tr>'
+        )
 
         return f"""
   <p><small>{nblobs} cached &middot; {nmisses} pending miss(es)</small></p>
@@ -773,14 +781,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if j.status == "running":
             if j.bytes_total:
                 pct = int(j.bytes_done * 100 / j.bytes_total)
-                prog = (f'<progress value="{j.bytes_done}" max="{j.bytes_total}"></progress>'
-                        f'<small>{human_size(j.bytes_done)} / {human_size(j.bytes_total)} ({pct}%)</small>')
+                prog = (
+                    f'<progress value="{j.bytes_done}" max="{j.bytes_total}"></progress>'
+                    f"<small>{human_size(j.bytes_done)} / {human_size(j.bytes_total)} "
+                    f"({pct}%)</small>"
+                )
             else:
-                prog = f'<progress></progress><small>{human_size(j.bytes_done)}</small>'
+                prog = f"<progress></progress><small>{human_size(j.bytes_done)}</small>"
         elif j.status == "completed":
-            prog = f'<small>{human_size(j.bytes_done)}</small>'
+            prog = f"<small>{human_size(j.bytes_done)}</small>"
         elif j.status == "failed":
-            prog = f'<small>{html.escape(j.error or "error")}</small>'
+            prog = f"<small>{html.escape(j.error or 'error')}</small>"
         else:  # queued / cancelled
             prog = "<small>—</small>"
         cancel = ""
@@ -815,8 +826,9 @@ def main():
         help="include the URL query string in the cache key "
         "(default: drop it, so signed/tokened URLs still match by path)",
     )
-    ap.add_argument("--workers", type=int, default=2,
-                    help="concurrent background download workers (default: 2)")
+    ap.add_argument(
+        "--workers", type=int, default=2, help="concurrent background download workers (default: 2)"
+    )
     args = ap.parse_args()
 
     store = Store(args.data_dir, keep_query=args.keep_query)

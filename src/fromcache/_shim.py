@@ -35,8 +35,7 @@ def cache_base(server: str) -> str:
 
 def env_server(tool: str) -> str | None:
     """Per-tool override (e.g. CURLFROMCACHE_SERVER) wins, else FROMCACHE_SERVER."""
-    return (os.environ.get(tool.upper() + "FROMCACHE_SERVER")
-            or os.environ.get("FROMCACHE_SERVER"))
+    return os.environ.get(tool.upper() + "FROMCACHE_SERVER") or os.environ.get("FROMCACHE_SERVER")
 
 
 def find_real(name: str) -> str | None:
@@ -74,7 +73,7 @@ def find_url(argv: list):
         if t == "--url" and i + 1 < len(argv):
             return (i + 1, argv[i + 1], "bare")
         if t.startswith("--url="):
-            return (i, t[len("--url="):], "urleq")
+            return (i, t[len("--url=") :], "urleq")
         if _SCHEME.match(t):
             return (i, t, "bare")
         i += 1
@@ -99,17 +98,15 @@ def rewrite(argv: list, idx: int, kind: str, new_url: str) -> list:
     return argv
 
 
-def run(tool: str, probe, argv=None):
-    """The shim entry point. ``probe(real_tool, url)`` returns True (hit),
-    False (miss), or None (cache unreachable)."""
-    argv = list(sys.argv[1:] if argv is None else argv)
-
+def plan(tool: str, probe, argv: list):
+    """Resolve (real_tool_path, final_argv) WITHOUT exec'ing — the testable core
+    of run(). ``probe(real_tool, url)`` returns True (hit) / False (miss) / None
+    (unreachable). On a hit the URL token is re-pointed at the cache; otherwise
+    argv is returned exactly as the user wrote it. real is None if no real tool
+    is found."""
     real = find_real(tool)
     if real is None:
-        sys.stderr.write(f"{tool}fromcache: no real {tool} found on PATH "
-                         f"(set $REAL_{tool.upper()})\n")
-        sys.exit(127)
-
+        return None, argv
     server = env_server(tool)
     found = find_url(argv) if server else None
     if server and found is not None:
@@ -117,10 +114,21 @@ def run(tool: str, probe, argv=None):
         url = blob_url(cache_base(server), origin)
         if probe(real, url) is True:
             argv = rewrite(argv, idx, kind, url)
-        # miss or unreachable: argv stays exactly as the user wrote it (origin)
+    return real, argv
 
+
+def run(tool: str, probe, argv=None):
+    """The shim entry point. ``probe(real_tool, url)`` returns True (hit),
+    False (miss), or None (cache unreachable)."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    real, final = plan(tool, probe, argv)
+    if real is None:
+        sys.stderr.write(
+            f"{tool}fromcache: no real {tool} found on PATH (set $REAL_{tool.upper()})\n"
+        )
+        sys.exit(127)
     try:
-        os.execv(real, [real, *argv])  # become the tool: exit code, signals, I/O
+        os.execv(real, [real, *final])  # become the tool: exit code, signals, I/O
     except OSError as e:
         sys.stderr.write(f"{tool}fromcache: cannot exec {real}: {e}\n")
         sys.exit(127)

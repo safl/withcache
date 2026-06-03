@@ -6,6 +6,7 @@ without an install.
 
 import http.server
 import os
+import shutil
 import socketserver
 import sys
 import tempfile
@@ -16,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import base64  # noqa: E402
 
-from fromcache import _shim, server  # noqa: E402
+from fromcache import _shim, curlfromcache, server, wgetfromcache  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -70,9 +71,7 @@ class TestStoreKeys(unittest.TestCase):
 
     def test_keep_query_mode(self):
         s = server.Store(tempfile.mkdtemp(), keep_query=True)
-        self.assertEqual(
-            s.normalize("https://h/x?a=1"), "https://h/x?a=1"
-        )
+        self.assertEqual(s.normalize("https://h/x?a=1"), "https://h/x?a=1")
 
     def test_key_is_stable_across_query_when_dropped(self):
         k1 = self.store.key_of(self.store.normalize("https://h/x?a=1"))
@@ -126,6 +125,7 @@ class TestStoreFromOrigin(unittest.TestCase):
         row = self.store.store_from_origin(url)
         self.assertEqual(row["size"], len(PAYLOAD))
         import hashlib
+
         self.assertEqual(row["sha256"], hashlib.sha256(PAYLOAD).hexdigest())
         # miss cleared, blob now retrievable, bytes on disk match
         self.assertEqual(self.store.list_misses(), [])
@@ -151,18 +151,21 @@ class TestShim(unittest.TestCase):
 
     def test_find_url_ignores_header_and_data_values(self):
         # a "://" inside a header/data value must NOT be taken as the URL
-        argv = ["-H", "Referer: https://ref.example", "--data", "u=https://x",
-                "https://real/target.bin"]
+        argv = [
+            "-H",
+            "Referer: https://ref.example",
+            "--data",
+            "u=https://x",
+            "https://real/target.bin",
+        ]
         _, url, kind = _shim.find_url(argv)
         self.assertEqual((url, kind), ("https://real/target.bin", "bare"))
 
     def test_find_url_urleq(self):
-        self.assertEqual(_shim.find_url(["--url=https://h/y", "-O"]),
-                         (0, "https://h/y", "urleq"))
+        self.assertEqual(_shim.find_url(["--url=https://h/y", "-O"]), (0, "https://h/y", "urleq"))
 
     def test_find_url_after_dashdash(self):
-        self.assertEqual(_shim.find_url(["-s", "--", "https://h/z"]),
-                         (2, "https://h/z", "bare"))
+        self.assertEqual(_shim.find_url(["-s", "--", "https://h/z"]), (2, "https://h/z", "bare"))
 
     def test_find_url_none(self):
         self.assertIsNone(_shim.find_url(["--version"]))
@@ -186,13 +189,15 @@ class TestShim(unittest.TestCase):
         self.assertTrue(u.startswith("http://c/b/"))
         self.assertTrue(u.endswith("/cuda.tar.gz"))
         self.assertNotIn("?", u)
-        token = u[len("http://c/b/"):].split("/")[0]
+        token = u[len("http://c/b/") :].split("/")[0]
         decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
         self.assertEqual(decoded, origin)  # server can recover the exact origin
 
     def test_env_server_override_precedence(self):
-        saved = {k: os.environ.get(k) for k in
-                 ("FROMCACHE_SERVER", "CURLFROMCACHE_SERVER", "WGETFROMCACHE_SERVER")}
+        saved = {
+            k: os.environ.get(k)
+            for k in ("FROMCACHE_SERVER", "CURLFROMCACHE_SERVER", "WGETFROMCACHE_SERVER")
+        }
         try:
             os.environ["FROMCACHE_SERVER"] = "http://shared:3000"
             os.environ["CURLFROMCACHE_SERVER"] = "http://curl-only:3000"
@@ -218,12 +223,113 @@ class TestShim(unittest.TestCase):
         try:
             sys.argv[0] = shim  # we are the shim, first on PATH
             os.environ["PATH"] = shim_dir + os.pathsep + real_dir
-            self.assertEqual(os.path.realpath(_shim.find_real("curl")),
-                             os.path.realpath(real))
+            self.assertEqual(os.path.realpath(_shim.find_real("curl")), os.path.realpath(real))
         finally:
             sys.argv[0], os.environ["PATH"] = saved_argv0, saved_path
             if saved_real is not None:
                 os.environ["REAL_CURL"] = saved_real
+
+
+# --------------------------------------------------------------------------
+# Shim integration: plan() decision path (stubbed probe, platform-independent).
+# This is the oracle's own end-to-end path — exercised so the fallback is not
+# an untested code path.
+# --------------------------------------------------------------------------
+class TestShimPlan(unittest.TestCase):
+    def setUp(self):
+        self.dummy = os.path.join(tempfile.mkdtemp(), "curl")
+        with open(self.dummy, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(self.dummy, 0o755)
+        self._saved = {
+            k: os.environ.get(k) for k in ("REAL_CURL", "FROMCACHE_SERVER", "CURLFROMCACHE_SERVER")
+        }
+        os.environ["REAL_CURL"] = self.dummy
+        os.environ.pop("CURLFROMCACHE_SERVER", None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def test_hit_rewrites_only_the_url(self):
+        os.environ["FROMCACHE_SERVER"] = "http://cache:3000"
+        argv = ["-fsSL", "https://h/p/cuda.tar.gz", "-o", "out"]
+        real, final = _shim.plan("curl", lambda r, u: True, argv)
+        self.assertEqual(real, self.dummy)
+        self.assertEqual([final[0], final[2], final[3]], ["-fsSL", "-o", "out"])
+        self.assertTrue(final[1].startswith("http://cache:3000/b/"))
+        self.assertTrue(final[1].endswith("/cuda.tar.gz"))
+
+    def test_miss_leaves_argv_untouched(self):
+        os.environ["FROMCACHE_SERVER"] = "http://cache:3000"
+        argv = ["https://h/x", "-O"]
+        _, final = _shim.plan("curl", lambda r, u: False, argv)
+        self.assertEqual(final, argv)
+
+    def test_unreachable_leaves_argv_untouched(self):
+        os.environ["FROMCACHE_SERVER"] = "http://cache:3000"
+        argv = ["https://h/x"]
+        _, final = _shim.plan("curl", lambda r, u: None, argv)
+        self.assertEqual(final, argv)
+
+    def test_no_server_skips_probe_entirely(self):
+        os.environ.pop("FROMCACHE_SERVER", None)
+        calls = []
+        argv = ["https://h/x"]
+        _, final = _shim.plan("curl", lambda r, u: calls.append(1) or True, argv)
+        self.assertEqual((final, calls), (argv, []))  # no env -> probe never runs
+
+    def test_no_real_tool_returns_none(self):
+        os.environ.pop("REAL_CURL", None)
+        saved_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = ""
+            real, final = _shim.plan("curl", lambda r, u: True, ["https://h/x"])
+            self.assertEqual((real, final), (None, ["https://h/x"]))
+        finally:
+            os.environ["PATH"] = saved_path
+
+
+# --------------------------------------------------------------------------
+# Real probe against an in-process cache (skipped where the tool is absent).
+# Validates the actual curl -I / wget --spider exit-code interpretation.
+# --------------------------------------------------------------------------
+def _start_fromcache():
+    store = server.Store(tempfile.mkdtemp(), keep_query=False)
+    httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    httpd.store = store
+    httpd.auth = server.Auth(b"k", None)  # auth disabled -> read path open
+    httpd.mgr = server.DownloadManager(store, workers=1)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, store
+
+
+class TestProbeReal(unittest.TestCase):
+    def setUp(self):
+        self.origin = socketserver.TCPServer(("127.0.0.1", 0), _Origin)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/art.bin"
+        self.httpd, self.store = _start_fromcache()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        for s in (self.origin, self.httpd):
+            s.shutdown()
+            s.server_close()
+
+    def _check(self, probe, real):
+        miss = self.origin_url + "/not-cached"
+        self.assertIs(probe(real, _shim.blob_url(self.base, miss)), False)
+        self.store.store_from_origin(self.origin_url)  # seed it
+        self.assertIs(probe(real, _shim.blob_url(self.base, self.origin_url)), True)
+
+    @unittest.skipUnless(shutil.which("curl"), "curl not installed")
+    def test_curl_probe(self):
+        self._check(curlfromcache.probe, shutil.which("curl"))
+
+    @unittest.skipUnless(shutil.which("wget"), "wget not installed")
+    def test_wget_probe(self):
+        self._check(wgetfromcache.probe, shutil.which("wget"))
 
 
 if __name__ == "__main__":

@@ -34,3 +34,16 @@ packages = ["src/fromcache"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/fromcache", "README.md", "LICENSE", "deploy", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests and the shims deliberately import after a sys.path tweak / fallback
+"tests/*" = ["E402"]
+"src/fromcache/curlfromcache.py" = ["E402"]
+"src/fromcache/wgetfromcache.py" = ["E402"]

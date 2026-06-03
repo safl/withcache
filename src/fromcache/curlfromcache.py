@@ -34,7 +34,9 @@ def probe(real_curl: str, url: str):
     try:
         r = subprocess.run(
             [real_curl, "-fsS", "-I", "-m", str(_shim.PROBE_TIMEOUT), "-o", os.devnull, url],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except OSError:
         return None
