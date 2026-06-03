@@ -16,6 +16,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import base64  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
 
 from fromcache import _shim, curlfromcache, server, wgetfromcache  # noqa: E402
 
@@ -133,6 +135,18 @@ class TestStoreFromOrigin(unittest.TestCase):
         self.assertIsNotNone(got)
         with open(self.store.blob_path(got["key"]), "rb") as f:
             self.assertEqual(f.read(), PAYLOAD)
+
+    def test_miss_count_carries_onto_blob_and_hits_increment(self):
+        url = f"http://127.0.0.1:{self.port}/artifact.bin"
+        self.store.record_miss(url)
+        self.store.record_miss(url)  # 2 requests while uncached
+        row = self.store.store_from_origin(url)
+        self.assertEqual(row["misses"], 2)  # carried over, survives caching
+        self.assertEqual(row["hits"], 0)
+        self.store.record_hit(row["key"])
+        self.store.record_hit(row["key"])
+        got = self.store.get_blob(url)
+        self.assertEqual((got["hits"], got["misses"]), (2, 2))
 
 
 # --------------------------------------------------------------------------
@@ -330,6 +344,41 @@ class TestProbeReal(unittest.TestCase):
     @unittest.skipUnless(shutil.which("wget"), "wget not installed")
     def test_wget_probe(self):
         self._check(wgetfromcache.probe, shutil.which("wget"))
+
+
+# --------------------------------------------------------------------------
+# Handler counters: a served GET counts as a hit; the shim's HEAD probe does
+# not; an uncached GET/HEAD records a miss.
+# --------------------------------------------------------------------------
+class TestHandlerCounters(unittest.TestCase):
+    def setUp(self):
+        self.origin = socketserver.TCPServer(("127.0.0.1", 0), _Origin)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/art.bin"
+        self.httpd, self.store = _start_fromcache()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        for s in (self.origin, self.httpd):
+            s.shutdown()
+            s.server_close()
+
+    def test_head_probe_does_not_count_but_get_does(self):
+        self.store.store_from_origin(self.origin_url)
+        bu = _shim.blob_url(self.base, self.origin_url)
+        # the shim probes with HEAD before the real download — must not count
+        urllib.request.urlopen(urllib.request.Request(bu, method="HEAD")).read()
+        self.assertEqual(self.store.get_blob(self.origin_url)["hits"], 0)
+        # the real download is a GET — counts as one served hit
+        urllib.request.urlopen(bu).read()
+        self.assertEqual(self.store.get_blob(self.origin_url)["hits"], 1)
+
+    def test_uncached_request_records_a_miss(self):
+        bu = _shim.blob_url(self.base, self.origin_url + "/nope")
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(bu)
+        self.assertEqual(cm.exception.code, 404)
+        self.assertEqual(self.store.list_misses()[0]["count"], 1)
 
 
 if __name__ == "__main__":

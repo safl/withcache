@@ -160,7 +160,9 @@ class Store:
                     size         INTEGER NOT NULL,
                     sha256       TEXT NOT NULL,
                     content_type TEXT,
-                    fetched_at   TEXT NOT NULL
+                    fetched_at   TEXT NOT NULL,
+                    hits         INTEGER NOT NULL DEFAULT 0,
+                    misses       INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS misses (
                     key        TEXT PRIMARY KEY,
@@ -171,6 +173,11 @@ class Store:
                 );
                 """
             )
+            # Migrate DBs created before the per-blob request counters existed.
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(blobs)")}
+            for col in ("hits", "misses"):
+                if col not in cols:
+                    c.execute(f"ALTER TABLE blobs ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
 
     # -- key handling ------------------------------------------------------
     def normalize(self, url: str) -> str:
@@ -227,6 +234,11 @@ class Store:
                 (key, url, ts, ts),
             )
 
+    def record_hit(self, key: str):
+        """Count one cache-served download (the GET, not the shim's HEAD probe)."""
+        with _DB_WRITE_LOCK, self.conn() as c:
+            c.execute("UPDATE blobs SET hits = hits + 1 WHERE key=?", (key,))
+
     def dismiss(self, key: str):
         with _DB_WRITE_LOCK, self.conn() as c:
             c.execute("DELETE FROM misses WHERE key=?", (key,))
@@ -270,16 +282,23 @@ class Store:
             raise
         ts = now_iso()
         with _DB_WRITE_LOCK, self.conn() as c:
+            # Carry the miss count accumulated while uncached onto the blob, so a
+            # URL's total request history (misses-before-cached + hits-since)
+            # survives the miss->cached transition. hits are preserved on a
+            # re-download (not in the UPDATE set).
+            row = c.execute("SELECT count FROM misses WHERE key=?", (key,)).fetchone()
+            prior_misses = row["count"] if row else 0
             c.execute(
                 """
-                INSERT INTO blobs (key, url, size, sha256, content_type, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO blobs (key, url, size, sha256, content_type, fetched_at, hits, misses)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
                 ON CONFLICT(key) DO UPDATE SET
                     url = excluded.url, size = excluded.size,
                     sha256 = excluded.sha256, content_type = excluded.content_type,
-                    fetched_at = excluded.fetched_at
+                    fetched_at = excluded.fetched_at,
+                    misses = blobs.misses + excluded.misses
                 """,
-                (key, url, size, sha.hexdigest(), content_type, ts),
+                (key, url, size, sha.hexdigest(), content_type, ts, prior_misses),
             )
             c.execute("DELETE FROM misses WHERE key=?", (key,))
             return c.execute("SELECT * FROM blobs WHERE key=?", (key,)).fetchone()
@@ -580,7 +599,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Fromcache-Sha256", row["sha256"])
         self.end_headers()
         if head_only:
-            return
+            return  # the shim's HEAD probe — not a served download, so don't count it
+        self.store.record_hit(row["key"])
         try:
             with open(path, "rb") as f:
                 while True:
@@ -741,12 +761,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 f"""<tr>
                 <td class="url">{html.escape(b["url"])}</td>
                 <td>{human_size(b["size"])}</td>
+                <td class="num">{b["hits"]}</td>
+                <td class="num">{b["misses"]}</td>
                 <td class="mono">{html.escape(b["sha256"][:12])}…</td>
                 <td><small>{html.escape(b["fetched_at"])}</small></td>
             </tr>"""
                 for b in blobs
             )
-            or '<tr><td colspan="4"><em>Cache is empty.</em></td></tr>'
+            or '<tr><td colspan="6"><em>Cache is empty.</em></td></tr>'
         )
 
         return f"""
@@ -766,13 +788,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
   <h4>Misses</h4>
   <figure><table class="striped">
-    <thead><tr><th>URL</th><th class="num">Hits</th><th>Last seen</th><th>Action</th></tr></thead>
+    <thead><tr><th>URL</th><th class="num">Misses</th><th>Last seen</th><th>Action</th></tr></thead>
     <tbody>{miss_rows}</tbody>
   </table></figure>
 
   <h4>Cached artifacts</h4>
   <figure><table class="striped">
-    <thead><tr><th>URL</th><th>Size</th><th>SHA-256</th><th>Fetched</th></tr></thead>
+    <thead><tr>
+      <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
+      <th>SHA-256</th><th>Fetched</th>
+    </tr></thead>
     <tbody>{blob_rows}</tbody>
   </table></figure>"""
 
