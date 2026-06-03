@@ -436,6 +436,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def mgr(self) -> DownloadManager:
         return self.server.mgr  # type: ignore[attr-defined]
 
+    @property
+    def auto_fetch(self) -> bool:
+        return self.server.auto_fetch  # type: ignore[attr-defined]
+
     def log_message(self, format, *args):  # quieter, single-line
         print(f"{self.address_string()} - {format % args}", flush=True)
 
@@ -590,6 +594,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         row = self.store.get_blob(url)
         if row is None:
             self.store.record_miss(url)
+            if self.auto_fetch:
+                # Pull it in the background so the next request hits; the client
+                # gets this one from origin (the shim falls through on a miss).
+                # In --curate mode an operator triggers the pull instead.
+                self.mgr.enqueue(url)
             self.send_text(404, "cache miss (recorded)\n")
             return
         path = self.store.blob_path(row["key"])
@@ -854,6 +863,12 @@ def main():
     ap.add_argument(
         "--workers", type=int, default=2, help="concurrent background download workers (default: 2)"
     )
+    ap.add_argument(
+        "--curate",
+        action="store_true",
+        help="require an operator to approve each pull (default: auto-fetch a "
+        "missed artifact in the background so the next request hits)",
+    )
     args = ap.parse_args()
 
     store = Store(args.data_dir, keep_query=args.keep_query)
@@ -864,9 +879,11 @@ def main():
     httpd.store = store  # type: ignore[attr-defined]
     httpd.auth = auth  # type: ignore[attr-defined]
     httpd.mgr = mgr  # type: ignore[attr-defined]
+    httpd.auto_fetch = not args.curate  # type: ignore[attr-defined]
     print(
         f"fromcache cache-host on http://{args.host}:{args.port}  "
-        f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers})",
+        f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "
+        f"mode={'curate' if args.curate else 'auto-fetch'})",
         flush=True,
     )
     if not auth.enabled:

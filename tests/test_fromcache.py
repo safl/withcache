@@ -308,12 +308,13 @@ class TestShimPlan(unittest.TestCase):
 # Real probe against an in-process cache (skipped where the tool is absent).
 # Validates the actual curl -I / wget --spider exit-code interpretation.
 # --------------------------------------------------------------------------
-def _start_fromcache():
+def _start_fromcache(auto_fetch=False):
     store = server.Store(tempfile.mkdtemp(), keep_query=False)
     httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     httpd.store = store
     httpd.auth = server.Auth(b"k", None)  # auth disabled -> read path open
     httpd.mgr = server.DownloadManager(store, workers=1)
+    httpd.auto_fetch = auto_fetch
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, store
 
@@ -379,6 +380,46 @@ class TestHandlerCounters(unittest.TestCase):
             urllib.request.urlopen(bu)
         self.assertEqual(cm.exception.code, 404)
         self.assertEqual(self.store.list_misses()[0]["count"], 1)
+
+
+# --------------------------------------------------------------------------
+# Auto-fetch vs --curate: a miss schedules a background pull by default; with
+# curation it only records the miss and waits for an operator.
+# --------------------------------------------------------------------------
+class TestAutoFetchOnMiss(unittest.TestCase):
+    def setUp(self):
+        self.origin = socketserver.TCPServer(("127.0.0.1", 0), _Origin)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/art.bin"
+
+    def tearDown(self):
+        self.origin.shutdown()
+        self.origin.server_close()
+
+    def _miss(self, httpd):
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(_shim.blob_url(base, self.origin_url))
+
+    def test_miss_schedules_pull_by_default(self):
+        httpd, store = _start_fromcache(auto_fetch=True)
+        try:
+            self._miss(httpd)
+            # the miss enqueued a background pull, no operator needed
+            self.assertTrue(any(j.url == self.origin_url for j in httpd.mgr.list()))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_curate_mode_records_miss_but_schedules_nothing(self):
+        httpd, store = _start_fromcache(auto_fetch=False)
+        try:
+            self._miss(httpd)
+            self.assertEqual(httpd.mgr.list(), [])  # nothing pulled without approval
+            self.assertEqual(store.list_misses()[0]["count"], 1)  # but it is recorded
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 if __name__ == "__main__":

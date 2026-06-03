@@ -23,10 +23,13 @@ Artifacts are cached **by their origin URL as a key**; the shim opts in by
 re-pointing the URL at the cache. No transparent proxy, no TLS interception, no
 client CA. The URL is a lookup key, not a connection target.
 
-Misses are **not** fetched automatically. An operator reviews the miss list in a
-small web UI and presses **Download** (or pre-seeds via *Add from URI*); only
-then does the cache-host pull from origin. So the cache-host is the only box that
-needs internet egress (and any vendor credentials), and clients never write to it.
+By default a miss is **auto-fetched**: the request falls through to origin (so
+the caller gets its file straight away), and the cache-host pulls the same
+artifact in the background, so the next request hits. Run with **`--curate`** to
+require a human instead, who reviews the miss list in a small web UI and presses
+**Download** (or pre-seeds via *Add from URI*). Either way the cache-host is the
+only box that needs internet egress (and any vendor credentials), and clients
+never write to it.
 
 ## Why not just curl + a caching proxy?
 
@@ -34,7 +37,7 @@ For `https://` (i.e. every vendor download) a forward proxy can't cache without
 **SSL-bump / MITM**: curl tunnels TLS end-to-end via `CONNECT`, so the proxy
 only sees ciphertext. The shim sidesteps that entirely by *re-pointing the URL*
 to the cache instead of intercepting the connection. And no proxy offers the
-**operator-curated** model (a miss queue a human approves).
+optional **operator-curated** model (`--curate`: a miss queue a human approves).
 
 ## Components
 
@@ -90,7 +93,8 @@ FROMCACHE_ADMIN_PASSWORD=change-me fromcache-server --data-dir ./data --port 300
 
 Data (blobs + `cache.db` + `session-secret`) lives in the `/data` volume (or
 `--data-dir`). Artifacts are immutable per version, so there's no cache
-invalidation. `--workers N` sets the number of concurrent download workers.
+invalidation. `--workers N` sets the number of concurrent download workers, and
+`--curate` switches from auto-fetch to operator-approved pulls.
 
 ## Use the shims (transparent `curl` / `wget`)
 
@@ -214,7 +218,7 @@ Notes & limits (all degrade gracefully; worst case is "no caching, curl still wo
 ## Operator UI
 
 `http://fromcache-server:3000/` (Pico.css + HTMX, bundled offline) shows:
-- **Misses**: each with **Download** (queues a background pull) and **Dismiss**.
+- **Misses**: auto-fetched by default, or (under `--curate`) each with **Download** (queues a background pull) and **Dismiss**.
 - **Downloads**: live progress bars, `queued/running/completed/cancelled/failed`, **Cancel**, and **Clear finished**. Downloads run in a background worker pool, not in the request, so large pulls never block, modelled on [bty]'s job managers.
 - **Cached artifacts**: URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at.
 - **Add from URI**: pre-seed an artifact before anyone misses it.
