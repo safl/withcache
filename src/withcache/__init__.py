@@ -8,4 +8,4 @@ Both modules are stdlib-only and self-contained, so either file can also be
 copied and run on its own with a plain ``python3``.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
