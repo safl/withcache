@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fromcache"
+version = "0.1.0"
+description = "Operator-curated, URL-keyed artifact cache for a small lab (CUDA/ROCm/DOCA/firmware)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Simon A. F. Lund", email = "safl@safl.dk" }]
+keywords = ["cache", "artifacts", "cuda", "rocm", "doca", "firmware", "lab"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Archiving :: Mirroring",
+]
+dependencies = []  # stdlib only, by design
+
+[project.urls]
+Homepage = "https://github.com/safl/fromcache"
+
+[project.scripts]
+fromcache = "fromcache.client:main"
+fromcache-server = "fromcache.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fromcache"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/fromcache", "README.md", "LICENSE", "deploy", "tests"]

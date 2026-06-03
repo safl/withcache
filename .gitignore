@@ -1,0 +1,16 @@
+# local cache-host state
+data/
+*.part
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# packaging / test artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.tox/
