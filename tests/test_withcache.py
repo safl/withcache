@@ -148,6 +148,23 @@ class TestStoreFromOrigin(unittest.TestCase):
         got = self.store.get_blob(url)
         self.assertEqual((got["hits"], got["misses"]), (2, 2))
 
+    def test_delete_blob_removes_row_and_file(self):
+        url = f"http://127.0.0.1:{self.port}/artifact.bin"
+        row = self.store.store_from_origin(url)
+        path = self.store.blob_path(row["key"])
+        self.assertTrue(os.path.exists(path))
+        self.store.delete_blob(row["key"])
+        self.assertIsNone(self.store.get_blob(url))
+        self.assertFalse(os.path.exists(path))
+
+    def test_capacity_guard_refuses_new_fills_when_full(self):
+        store = server.Store(tempfile.mkdtemp(), keep_query=False, max_bytes=1)
+        self.assertTrue(store.has_capacity())  # empty: room for the first
+        store.store_from_origin(f"http://127.0.0.1:{self.port}/a.bin")
+        self.assertFalse(store.has_capacity())  # now over the 1-byte cap
+        with self.assertRaises(server.CacheFull):
+            store.store_from_origin(f"http://127.0.0.1:{self.port}/b.bin")
+
 
 # --------------------------------------------------------------------------
 # _shim: URL detection, rewrite, real-tool resolution, env, path-encoding
@@ -420,6 +437,68 @@ class TestAutoFetchOnMiss(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+# --------------------------------------------------------------------------
+# Fetch-with-headers: a registry blob behind bearer auth (the oras case). bty
+# pre-resolves the token and hands it to withcache for the fill.
+# --------------------------------------------------------------------------
+class _AuthOrigin(http.server.BaseHTTPRequestHandler):
+    TOKEN = "Bearer s3cret"
+
+    def do_GET(self):
+        if self.headers.get("Authorization") != self.TOKEN:
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(PAYLOAD)))
+        self.end_headers()
+        self.wfile.write(PAYLOAD)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestFetchWithHeaders(unittest.TestCase):
+    def setUp(self):
+        self.httpd = socketserver.TCPServer(("127.0.0.1", 0), _AuthOrigin)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/blob.bin"
+        self.store = server.Store(tempfile.mkdtemp(), keep_query=False)
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_fetch_without_header_is_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.store.store_from_origin(self.url)
+        self.assertEqual(cm.exception.code, 401)
+
+    def test_fetch_with_bearer_header_succeeds(self):
+        row = self.store.store_from_origin(self.url, headers={"Authorization": _AuthOrigin.TOKEN})
+        self.assertEqual(row["size"], len(PAYLOAD))
+
+
+# --------------------------------------------------------------------------
+# Pure helpers
+# --------------------------------------------------------------------------
+class TestParsers(unittest.TestCase):
+    def test_parse_size(self):
+        self.assertEqual(server.parse_size(""), 0)
+        self.assertEqual(server.parse_size("0"), 0)
+        self.assertEqual(server.parse_size("1024"), 1024)
+        self.assertEqual(server.parse_size("50M"), 50 * 1024**2)
+        self.assertEqual(server.parse_size("1.5G"), int(1.5 * 1024**3))
+
+    def test_parse_headers(self):
+        self.assertIsNone(server.parse_headers(""))
+        self.assertEqual(
+            server.parse_headers("Authorization: Bearer x"), {"Authorization": "Bearer x"}
+        )
+        self.assertEqual(server.parse_headers("A: 1\nB: 2"), {"A": "1", "B": "2"})
 
 
 if __name__ == "__main__":

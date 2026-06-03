@@ -93,8 +93,10 @@ WITHCACHE_ADMIN_PASSWORD=change-me withcache-server --data-dir ./data --port 300
 
 Data (blobs + `cache.db` + `session-secret`) lives in the `/data` volume (or
 `--data-dir`). Artifacts are immutable per version, so there's no cache
-invalidation. `--workers N` sets the number of concurrent download workers, and
-`--curate` switches from auto-fetch to operator-approved pulls.
+invalidation. `--workers N` sets the number of concurrent download workers,
+`--curate` switches from auto-fetch to operator-approved pulls, and `--max-bytes`
+(e.g. `50G`) caps the cache: when full it refuses new fills (no auto-eviction),
+and you free space by deleting artifacts in the UI.
 
 ## Use the shims (transparent `curl` / `wget`)
 
@@ -220,7 +222,7 @@ Notes & limits (all degrade gracefully; worst case is "no caching, curl still wo
 `http://withcache-server:3000/` (Pico.css + HTMX, bundled offline) shows:
 - **Misses**: auto-fetched by default, or (under `--curate`) each with **Download** (queues a background pull) and **Dismiss**.
 - **Downloads**: live progress bars, `queued/running/completed/cancelled/failed`, **Cancel**, and **Clear finished**. Downloads run in a background worker pool, not in the request, so large pulls never block, modelled on [bty]'s job managers.
-- **Cached artifacts**: URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at.
+- **Cached artifacts**: URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at, each with **Delete** to free space.
 - **Add from URI**: pre-seed an artifact before anyone misses it.
 
 ## Auth

@@ -60,6 +60,28 @@ def human_size(n: int) -> str:
     return f"{n} B"
 
 
+def parse_size(s: str) -> int:
+    """Parse '0', '1024', '50M', '20G', '1.5T' into bytes (suffixes are 1024-based)."""
+    s = str(s).strip()
+    if not s:
+        return 0
+    units = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    if s[-1].upper() in units:
+        return int(float(s[:-1]) * units[s[-1].upper()])
+    return int(s)
+
+
+def parse_headers(raw: str) -> dict | None:
+    """Parse 'Name: Value' lines (e.g. a registry Authorization header that bty
+    pre-resolves for an oras blob) into a dict for the origin fetch; None if empty."""
+    out = {}
+    for line in (raw or "").splitlines():
+        name, sep, value = line.partition(":")
+        if sep and name.strip():
+            out[name.strip()] = value.strip()
+    return out or None
+
+
 # --------------------------------------------------------------------------
 # Auth — server-signed session cookie (bty-style, env-password instead of PAM)
 # --------------------------------------------------------------------------
@@ -135,12 +157,13 @@ class Auth:
 class Store:
     """Blobs on disk keyed by hash(normalized url); metadata in SQLite."""
 
-    def __init__(self, data_dir: str, keep_query: bool):
+    def __init__(self, data_dir: str, keep_query: bool, max_bytes: int = 0):
         self.data_dir = os.path.abspath(data_dir)
         self.blob_dir = os.path.join(self.data_dir, "blobs")
         self.tmp_dir = os.path.join(self.data_dir, "tmp")
         self.db_path = os.path.join(self.data_dir, "cache.db")
         self.keep_query = keep_query
+        self.max_bytes = max_bytes  # cap on total cached bytes; 0 = unlimited
         os.makedirs(self.blob_dir, exist_ok=True)
         os.makedirs(self.tmp_dir, exist_ok=True)
         self._init_db()
@@ -217,6 +240,15 @@ class Store:
             m = c.execute("SELECT COUNT(*) FROM misses").fetchone()[0]
         return b, m
 
+    def total_size(self) -> int:
+        with self.conn() as c:
+            return c.execute("SELECT COALESCE(SUM(size), 0) FROM blobs").fetchone()[0]
+
+    def has_capacity(self) -> bool:
+        """False once stored bytes reach --max-bytes (0 = unlimited). The guard
+        refuses *new* fills when full; it never evicts (delete is manual)."""
+        return self.max_bytes <= 0 or self.total_size() < self.max_bytes
+
     # -- writes ------------------------------------------------------------
     def record_miss(self, url: str):
         key = self.key_of(self.normalize(url))
@@ -243,17 +275,34 @@ class Store:
         with _DB_WRITE_LOCK, self.conn() as c:
             c.execute("DELETE FROM misses WHERE key=?", (key,))
 
-    def store_from_origin(self, url: str, progress=None, cancel=None) -> sqlite3.Row:
+    def delete_blob(self, key: str):
+        """Drop a cached artifact (row + bytes). The manual half of eviction."""
+        with _DB_WRITE_LOCK, self.conn() as c:
+            c.execute("DELETE FROM blobs WHERE key=?", (key,))
+        try:
+            os.remove(self.blob_path(key))
+        except FileNotFoundError:
+            pass
+
+    def store_from_origin(self, url: str, progress=None, cancel=None, headers=None) -> sqlite3.Row:
         """Operator-triggered: pull the artifact from origin and store it.
 
         ``progress(done, total)`` is called as bytes arrive (total may be None);
         ``cancel()`` is polled between chunks and, if truthy, aborts the pull
         with :class:`DownloadCancelled` and leaves no partial file behind.
+        ``headers`` adds request headers to the origin fetch (e.g. a registry
+        bearer token bty pre-resolved for an oras blob). Raises :class:`CacheFull`
+        if the cache is already at --max-bytes.
         """
+        if not self.has_capacity():
+            raise CacheFull(f"cache full (>= {self.max_bytes} bytes); refusing to fetch {url}")
         normalized = self.normalize(url)
         key = self.key_of(normalized)
         tmp = os.path.join(self.tmp_dir, key + ".part")
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        req_headers = {"User-Agent": USER_AGENT}
+        if headers:
+            req_headers.update(headers)
+        req = urllib.request.Request(url, headers=req_headers)
         sha = hashlib.sha256()
         size = 0
         try:
@@ -315,6 +364,10 @@ class DownloadCancelled(Exception):
     """Raised inside a worker when its job's cancel flag is set."""
 
 
+class CacheFull(Exception):
+    """Raised when --max-bytes is reached; the fill is refused, not evicted."""
+
+
 @dataclass
 class Job:
     id: int
@@ -326,6 +379,7 @@ class Job:
     finished_at: float | None = None
     error: str | None = None
     sha256: str | None = None
+    headers: dict | None = field(default=None, repr=False)  # e.g. registry auth; never logged
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
@@ -345,12 +399,12 @@ class DownloadManager:
         for _ in range(max(1, workers)):
             threading.Thread(target=self._worker, daemon=True).start()
 
-    def enqueue(self, url: str) -> Job:
+    def enqueue(self, url: str, headers: dict | None = None) -> Job:
         with self._lock:
             jid = self._active.get(url)
             if jid is not None and self._jobs[jid].status in PENDING_STATES:
                 return self._jobs[jid]  # dedup an already-pending pull
-            job = Job(id=next(self._ids), url=url)
+            job = Job(id=next(self._ids), url=url, headers=headers)
             self._jobs[job.id] = job
             self._active[url] = job.id
         self._q.put(job.id)
@@ -392,6 +446,7 @@ class DownloadManager:
                     job.url,
                     progress=lambda done, total, j=job: _set_progress(j, done, total),
                     cancel=job._cancel.is_set,
+                    headers=job.headers,
                 )
                 with self._lock:
                     job.status = "completed"
@@ -474,7 +529,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_text(404, "")
 
-    ADMIN_POST = ("/admin/fetch", "/admin/dismiss", "/admin/cancel", "/admin/clear")
+    ADMIN_POST = (
+        "/admin/fetch",
+        "/admin/dismiss",
+        "/admin/delete",
+        "/admin/cancel",
+        "/admin/clear",
+    )
 
     def do_POST(self):
         parsed = urllib.parse.urlsplit(self.path)
@@ -490,9 +551,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if parsed.path == "/admin/fetch":
                 url = form.get("url", "").strip()
                 if url:
-                    self.mgr.enqueue(url)
+                    self.mgr.enqueue(url, headers=parse_headers(form.get("header", "")))
             elif parsed.path == "/admin/dismiss":
                 self.store.dismiss(form.get("key", "").strip())
+            elif parsed.path == "/admin/delete":
+                self.store.delete_blob(form.get("key", "").strip())
             elif parsed.path == "/admin/cancel":
                 jid = form.get("id", "")
                 if jid.isdigit():
@@ -594,10 +657,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         row = self.store.get_blob(url)
         if row is None:
             self.store.record_miss(url)
-            if self.auto_fetch:
+            if self.auto_fetch and self.store.has_capacity():
                 # Pull it in the background so the next request hits; the client
-                # gets this one from origin (the shim falls through on a miss).
-                # In --curate mode an operator triggers the pull instead.
+                # gets this one from origin (the shim, or bty's fallback chain,
+                # falls through on a miss). In --curate mode an operator triggers
+                # the pull instead; when the cache is full we record the miss but
+                # schedule nothing (delete something first).
                 self.mgr.enqueue(url)
             self.send_text(404, "cache miss (recorded)\n")
             return
@@ -736,6 +801,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         jobs = self.mgr.list()
         misses = self.store.list_misses()
         blobs = self.store.list_blobs()
+        used = human_size(self.store.total_size())
+        if self.store.max_bytes:
+            used += f" / {human_size(self.store.max_bytes)}"
+        full = "" if self.store.has_capacity() else " &middot; <strong>cache full</strong>"
 
         job_rows = (
             "".join(self._job_row(j) for j in jobs)
@@ -774,14 +843,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 <td class="num">{b["misses"]}</td>
                 <td class="mono">{html.escape(b["sha256"][:12])}…</td>
                 <td><small>{html.escape(b["fetched_at"])}</small></td>
+                <td>
+                  <form hx-post="/admin/delete" hx-target="#dash" hx-swap="innerHTML"
+                        hx-confirm="Delete this cached artifact?">
+                    <input type="hidden" name="key" value="{html.escape(b["key"], quote=True)}">
+                    <button type="submit" class="secondary outline">Delete</button>
+                  </form>
+                </td>
             </tr>"""
                 for b in blobs
             )
-            or '<tr><td colspan="6"><em>Cache is empty.</em></td></tr>'
+            or '<tr><td colspan="7"><em>Cache is empty.</em></td></tr>'
         )
 
         return f"""
-  <p><small>{nblobs} cached &middot; {nmisses} pending miss(es)</small></p>
+  <p><small>{nblobs} cached ({used}){full} &middot; {nmisses} pending miss(es)</small></p>
 
   <div class="row">
     <h4>Downloads</h4>
@@ -805,7 +881,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
   <figure><table class="striped">
     <thead><tr>
       <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
-      <th>SHA-256</th><th>Fetched</th>
+      <th>SHA-256</th><th>Fetched</th><th>Action</th>
     </tr></thead>
     <tbody>{blob_rows}</tbody>
   </table></figure>"""
@@ -869,9 +945,15 @@ def main():
         help="require an operator to approve each pull (default: auto-fetch a "
         "missed artifact in the background so the next request hits)",
     )
+    ap.add_argument(
+        "--max-bytes",
+        default="0",
+        help="cap total cached bytes and refuse new fills when full (0 = "
+        "unlimited; accepts 1024-based suffixes, e.g. 50G). Eviction is manual.",
+    )
     args = ap.parse_args()
 
-    store = Store(args.data_dir, keep_query=args.keep_query)
+    store = Store(args.data_dir, keep_query=args.keep_query, max_bytes=parse_size(args.max_bytes))
     auth = Auth(resolve_secret(store.data_dir), os.environ.get("WITHCACHE_ADMIN_PASSWORD"))
     mgr = DownloadManager(store, workers=args.workers)
 
@@ -883,7 +965,8 @@ def main():
     print(
         f"withcache cache-host on http://{args.host}:{args.port}  "
         f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "
-        f"mode={'curate' if args.curate else 'auto-fetch'})",
+        f"mode={'curate' if args.curate else 'auto-fetch'}, "
+        f"max_bytes={'unlimited' if not store.max_bytes else human_size(store.max_bytes)})",
         flush=True,
     )
     if not auth.enabled:
