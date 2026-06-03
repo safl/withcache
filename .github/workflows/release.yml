@@ -59,3 +59,34 @@ jobs:
           name: dist
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Cross-compile the native shim to static, dependency-free binaries and attach
+  # them to the GitHub Release. One binary serves both tools (dispatch on argv[0]);
+  # download, chmod +x, and symlink it as `curl` / `wget` on the client's PATH.
+  shim:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload release assets
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-linux-musl, aarch64-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      # If 0.16.0 isn't yet a fetchable Zig release, pin to "master".
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build static binary
+        working-directory: shim
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall -Dstatic
+      - name: Stage + checksum
+        run: |
+          mkdir -p out
+          cp shim/zig-out/bin/fromcache-shim out/fromcache-shim-${{ matrix.target }}
+          ( cd out && sha256sum fromcache-shim-${{ matrix.target }} > fromcache-shim-${{ matrix.target }}.sha256 )
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" out/* --clobber

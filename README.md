@@ -42,17 +42,36 @@ to the cache instead of intercepting the connection. And no proxy offers the
 |-------------------------------|-------------------------------------------------------------|
 | `src/fromcache/server.py`     | The cache-host: blob store + miss table + **background download manager** + operator UI (Pico.css + HTMX) |
 | `src/fromcache/_shim.py`      | Shared shim core (find URL → probe → rewrite → exec)        |
-| `src/fromcache/curlfromcache.py` | The `curl` shim                                          |
-| `src/fromcache/wgetfromcache.py` | The `wget` shim                                          |
+| `src/fromcache/curlfromcache.py` / `wgetfromcache.py` | The Python `curl` / `wget` shims    |
+| `shim/shim.zig`               | The native shim — one static binary, both tools via `argv[0]` |
 | `deploy/Containerfile`, `deploy/compose.yml` | Single Podman/Docker host deploy             |
 
-Everything is **stdlib-only Python** — no third-party runtime dependencies.
+The cache-host and the Python shims are **stdlib-only** (no third-party runtime
+deps); the native shim is a dependency-free static binary.
 
 ## Install
 
+The **cache-host** and **Python shims** (works on any box with Python):
+
 ```sh
-pip install fromcache    # provides: curlfromcache  wgetfromcache  fromcache-server
+pipx install fromcache    # or: uv tool install fromcache  /  pip install fromcache
+# provides: curlfromcache  wgetfromcache  fromcache-server
 ```
+
+The **native shim** (no Python needed — for minimal/distroless boxes; ~200 KB
+static musl binary). Grab it from the [Releases] page; one binary serves both
+tools by the name it's invoked as:
+
+```sh
+curl -L .../releases/.../fromcache-shim-x86_64-linux-musl -o /usr/local/bin/curlfromcache
+chmod +x /usr/local/bin/curlfromcache
+```
+
+The Python shim is also the tested **oracle** and install-time fallback for
+platforms without a prebuilt binary; a [differential test](tests/test_differential.py)
+asserts the binary and the Python `plan()` rewrite argv identically.
+
+[Releases]: https://github.com/safl/fromcache/releases
 
 ## Deploy the cache-host
 

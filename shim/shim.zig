@@ -28,7 +28,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const vector = init.args.vector; // []const [*:0]const u8
     const arg0 = std.mem.span(vector[0]);
-    const tool: Tool = if (std.mem.endsWith(u8, std.fs.path.basename(arg0), "wget")) .wget else .curl;
+    // "contains wget" so both `wget` and `wgetfromcache` (the installed name) resolve.
+    const base = std.fs.path.basename(arg0);
+    const tool: Tool = if (std.mem.indexOf(u8, base, "wget") != null) .wget else .curl;
     const tool_name = @tagName(tool);
     const args = vector[1..];
 
