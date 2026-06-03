@@ -14,7 +14,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from fromcache import client, server  # noqa: E402
+import base64  # noqa: E402
+
+from fromcache import _shim, server  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -134,16 +136,94 @@ class TestStoreFromOrigin(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# Client pure-function helpers
+# _shim: URL detection, rewrite, real-tool resolution, env, path-encoding
 # --------------------------------------------------------------------------
-class TestClientHelpers(unittest.TestCase):
-    def test_cache_base_prepends_scheme(self):
-        self.assertEqual(client.cache_base("box:3000"), "http://box:3000")
-        self.assertEqual(client.cache_base("https://box:3000/"), "https://box:3000")
+class TestShim(unittest.TestCase):
+    def test_cache_base(self):
+        self.assertEqual(_shim.cache_base("box:3000"), "http://box:3000")
+        self.assertEqual(_shim.cache_base("https://box:3000/"), "https://box:3000")
 
-    def test_default_output_is_basename(self):
-        self.assertEqual(client.default_output("https://h/a/b/cuda.tgz"), "cuda.tgz")
-        self.assertEqual(client.default_output("https://h/"), "download")
+    def test_find_url_bare(self):
+        self.assertEqual(
+            _shim.find_url(["-fsSL", "https://h/x.tgz", "-o", "x"]),
+            (1, "https://h/x.tgz", "bare"),
+        )
+
+    def test_find_url_ignores_header_and_data_values(self):
+        # a "://" inside a header/data value must NOT be taken as the URL
+        argv = ["-H", "Referer: https://ref.example", "--data", "u=https://x",
+                "https://real/target.bin"]
+        _, url, kind = _shim.find_url(argv)
+        self.assertEqual((url, kind), ("https://real/target.bin", "bare"))
+
+    def test_find_url_urleq(self):
+        self.assertEqual(_shim.find_url(["--url=https://h/y", "-O"]),
+                         (0, "https://h/y", "urleq"))
+
+    def test_find_url_after_dashdash(self):
+        self.assertEqual(_shim.find_url(["-s", "--", "https://h/z"]),
+                         (2, "https://h/z", "bare"))
+
+    def test_find_url_none(self):
+        self.assertIsNone(_shim.find_url(["--version"]))
+        self.assertIsNone(_shim.find_url(["-H", "X: y"]))
+
+    def test_rewrite(self):
+        self.assertEqual(
+            _shim.rewrite(["a", "https://o/p", "b"], 1, "bare", "http://c/b/x/p"),
+            ["a", "http://c/b/x/p", "b"],
+        )
+        self.assertEqual(
+            _shim.rewrite(["--url=https://o"], 0, "urleq", "http://c/b/x/p"),
+            ["--url=http://c/b/x/p"],
+        )
+
+    def test_blob_url_path_encodes_with_basename(self):
+        # path-encoded so any downloader names the file after the artifact,
+        # and there's no query string to pollute the name
+        origin = "https://h/p/cuda.tar.gz?token=abc"
+        u = _shim.blob_url("http://c", origin)
+        self.assertTrue(u.startswith("http://c/b/"))
+        self.assertTrue(u.endswith("/cuda.tar.gz"))
+        self.assertNotIn("?", u)
+        token = u[len("http://c/b/"):].split("/")[0]
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+        self.assertEqual(decoded, origin)  # server can recover the exact origin
+
+    def test_env_server_override_precedence(self):
+        saved = {k: os.environ.get(k) for k in
+                 ("FROMCACHE_SERVER", "CURLFROMCACHE_SERVER", "WGETFROMCACHE_SERVER")}
+        try:
+            os.environ["FROMCACHE_SERVER"] = "http://shared:3000"
+            os.environ["CURLFROMCACHE_SERVER"] = "http://curl-only:3000"
+            os.environ.pop("WGETFROMCACHE_SERVER", None)
+            self.assertEqual(_shim.env_server("curl"), "http://curl-only:3000")
+            self.assertEqual(_shim.env_server("wget"), "http://shared:3000")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_find_real_skips_self(self):
+        shim_dir, real_dir = tempfile.mkdtemp(), tempfile.mkdtemp()
+        shim, real = os.path.join(shim_dir, "curl"), os.path.join(real_dir, "curl")
+        for p in (shim, real):
+            with open(p, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(p, 0o755)
+        saved_argv0, saved_path = sys.argv[0], os.environ.get("PATH", "")
+        saved_real = os.environ.pop("REAL_CURL", None)
+        try:
+            sys.argv[0] = shim  # we are the shim, first on PATH
+            os.environ["PATH"] = shim_dir + os.pathsep + real_dir
+            self.assertEqual(os.path.realpath(_shim.find_real("curl")),
+                             os.path.realpath(real))
+        finally:
+            sys.argv[0], os.environ["PATH"] = saved_argv0, saved_path
+            if saved_real is not None:
+                os.environ["REAL_CURL"] = saved_real
 
 
 if __name__ == "__main__":

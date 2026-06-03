@@ -26,8 +26,10 @@ import hmac
 import html
 import http.cookies
 import http.server
+import itertools
 import json
 import os
+import queue
 import secrets
 import socketserver
 import sqlite3
@@ -35,10 +37,14 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 CHUNK = 64 * 1024
 USER_AGENT = "fromcache-cache/0.1"
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+MIME_TYPES = {".css": "text/css; charset=utf-8",
+              ".js": "application/javascript; charset=utf-8"}
 _DB_WRITE_LOCK = threading.Lock()
 
 
@@ -230,25 +236,43 @@ class Store:
         with _DB_WRITE_LOCK, self.conn() as c:
             c.execute("DELETE FROM misses WHERE key=?", (key,))
 
-    def store_from_origin(self, url: str) -> sqlite3.Row:
-        """Operator-triggered: pull the artifact from origin and store it."""
+    def store_from_origin(self, url: str, progress=None, cancel=None) -> sqlite3.Row:
+        """Operator-triggered: pull the artifact from origin and store it.
+
+        ``progress(done, total)`` is called as bytes arrive (total may be None);
+        ``cancel()`` is polled between chunks and, if truthy, aborts the pull
+        with :class:`DownloadCancelled` and leaves no partial file behind.
+        """
         normalized = self.normalize(url)
         key = self.key_of(normalized)
         tmp = os.path.join(self.tmp_dir, key + ".part")
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         sha = hashlib.sha256()
         size = 0
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            content_type = resp.headers.get_content_type()
-            with open(tmp, "wb") as f:
-                while True:
-                    chunk = resp.read(CHUNK)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    sha.update(chunk)
-                    size += len(chunk)
-        os.replace(tmp, self.blob_path(key))
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                content_type = resp.headers.get_content_type()
+                cl = resp.headers.get("Content-Length")
+                total = int(cl) if cl and cl.isdigit() else None
+                if progress:
+                    progress(0, total)
+                with open(tmp, "wb") as f:
+                    while True:
+                        if cancel and cancel():
+                            raise DownloadCancelled()
+                        chunk = resp.read(CHUNK)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        sha.update(chunk)
+                        size += len(chunk)
+                        if progress:
+                            progress(size, total)
+            os.replace(tmp, self.blob_path(key))
+        except BaseException:
+            if os.path.exists(tmp):
+                os.remove(tmp)  # no half-written blob on cancel/error
+            raise
         ts = now_iso()
         with _DB_WRITE_LOCK, self.conn() as c:
             c.execute(
@@ -267,6 +291,119 @@ class Store:
 
 
 # --------------------------------------------------------------------------
+# Background download manager (thread pool; modelled on bty's job managers)
+# --------------------------------------------------------------------------
+JOB_STATES = ("queued", "running", "completed", "cancelled", "failed")
+PENDING_STATES = frozenset(("queued", "running"))
+
+
+class DownloadCancelled(Exception):
+    """Raised inside a worker when its job's cancel flag is set."""
+
+
+@dataclass
+class Job:
+    id: int
+    url: str
+    status: str = "queued"
+    bytes_done: int = 0
+    bytes_total: int | None = None
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
+    sha256: str | None = None
+    _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+
+
+class DownloadManager:
+    """Operator-triggered downloads run here, not in the request handler:
+    enqueue() returns immediately, worker threads pull from a queue, each job
+    reports progress and honors a per-job cancel flag. Jobs are in-memory
+    (completed artifacts persist as blobs); restarting drops in-flight jobs."""
+
+    def __init__(self, store: Store, workers: int = 2):
+        self.store = store
+        self._jobs: dict[int, Job] = {}
+        self._active: dict[str, int] = {}  # url -> job id, while queued/running
+        self._lock = threading.Lock()
+        self._q: "queue.Queue[int]" = queue.Queue()
+        self._ids = itertools.count(1)
+        for _ in range(max(1, workers)):
+            threading.Thread(target=self._worker, daemon=True).start()
+
+    def enqueue(self, url: str) -> Job:
+        with self._lock:
+            jid = self._active.get(url)
+            if jid is not None and self._jobs[jid].status in PENDING_STATES:
+                return self._jobs[jid]  # dedup an already-pending pull
+            job = Job(id=next(self._ids), url=url)
+            self._jobs[job.id] = job
+            self._active[url] = job.id
+        self._q.put(job.id)
+        return job
+
+    def cancel(self, jid: int) -> Job | None:
+        with self._lock:
+            job = self._jobs.get(jid)
+            if job is None:
+                return None
+            if job.status in PENDING_STATES:
+                job._cancel.set()
+                if job.status == "queued":  # never started: terminate now
+                    job.status = "cancelled"
+                    job.finished_at = time.time()
+                    self._active.pop(job.url, None)
+            return job
+
+    def list(self) -> list[Job]:
+        with self._lock:
+            return sorted(self._jobs.values(), key=lambda j: j.id, reverse=True)
+
+    def clear_finished(self):
+        with self._lock:
+            for jid in [j.id for j in self._jobs.values() if j.status not in PENDING_STATES]:
+                self._jobs.pop(jid, None)
+
+    def _worker(self):
+        while True:
+            jid = self._q.get()
+            with self._lock:
+                job = self._jobs.get(jid)
+                if job is None or job.status != "queued":
+                    continue  # cancelled while queued, or gone
+                job.status = "running"
+                job.started_at = time.time()
+            try:
+                row = self.store.store_from_origin(
+                    job.url,
+                    progress=lambda done, total, j=job: _set_progress(j, done, total),
+                    cancel=job._cancel.is_set,
+                )
+                with self._lock:
+                    job.status = "completed"
+                    job.sha256 = row["sha256"]
+                    job.bytes_done = job.bytes_total = row["size"]
+            except DownloadCancelled:
+                with self._lock:
+                    job.status = "cancelled"
+            except Exception as e:
+                with self._lock:
+                    job.status = "cancelled" if job._cancel.is_set() else "failed"
+                    job.error = str(e)
+            finally:
+                with self._lock:
+                    job.finished_at = time.time()
+                    if self._active.get(job.url) == job.id:
+                        self._active.pop(job.url, None)
+
+
+def _set_progress(job: Job, done: int, total: int | None):
+    job.bytes_done = done
+    if total is not None:
+        job.bytes_total = total
+
+
+# --------------------------------------------------------------------------
 # HTTP handler
 # --------------------------------------------------------------------------
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -281,18 +418,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def auth(self) -> Auth:
         return self.server.auth  # type: ignore[attr-defined]
 
+    @property
+    def mgr(self) -> DownloadManager:
+        return self.server.mgr  # type: ignore[attr-defined]
+
     def log_message(self, format, *args):  # quieter, single-line
         print(f"{self.address_string()} - {format % args}", flush=True)
 
     # -- routing -----------------------------------------------------------
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
-        if parsed.path == "/blob":
+        if parsed.path == "/blob" or parsed.path.startswith("/b/"):
             self.handle_blob(parsed, head_only=False)
         elif parsed.path == "/healthz":
             self.send_text(200, "ok\n")
+        elif parsed.path.startswith("/static/"):
+            self.serve_static(parsed)
         elif parsed.path == "/ui/login":
             self.handle_login_form()
+        elif parsed.path == "/admin/dash":
+            if not self.is_authed():
+                self.send_text(401, "login required\n")
+            else:
+                self.send_html(200, self.render_dash())
         elif parsed.path == "/":
             if not self.is_authed():
                 self.redirect("/ui/login")
@@ -303,10 +451,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         parsed = urllib.parse.urlsplit(self.path)
-        if parsed.path == "/blob":
+        if parsed.path == "/blob" or parsed.path.startswith("/b/"):
             self.handle_blob(parsed, head_only=True)
         else:
             self.send_text(404, "")
+
+    ADMIN_POST = ("/admin/fetch", "/admin/dismiss", "/admin/cancel", "/admin/clear")
 
     def do_POST(self):
         parsed = urllib.parse.urlsplit(self.path)
@@ -315,15 +465,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.handle_login_submit(form)
         elif parsed.path == "/ui/logout":
             self.handle_logout()
-        elif parsed.path in ("/admin/fetch", "/admin/dismiss"):
+        elif parsed.path in self.ADMIN_POST:
             if not self.is_authed():
                 self.send_text(401, "login required\n")
                 return
             if parsed.path == "/admin/fetch":
-                self.handle_admin_fetch(form)
-            else:
+                url = form.get("url", "").strip()
+                if url:
+                    self.mgr.enqueue(url)
+            elif parsed.path == "/admin/dismiss":
                 self.store.dismiss(form.get("key", "").strip())
-                self.redirect("/")
+            elif parsed.path == "/admin/cancel":
+                jid = form.get("id", "")
+                if jid.isdigit():
+                    self.mgr.cancel(int(jid))
+            elif parsed.path == "/admin/clear":
+                self.mgr.clear_finished()
+            self.respond_admin()
         else:
             self.send_text(404, "not found\n")
 
@@ -345,6 +503,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None
         m = jar.get(name)
         return m.value if m else None
+
+    def is_htmx(self) -> bool:
+        return self.headers.get("HX-Request") == "true"
+
+    def serve_static(self, parsed):
+        name = os.path.basename(parsed.path)  # basename blocks path traversal
+        path = os.path.join(STATIC_DIR, name)
+        if not name or not os.path.isfile(path):
+            self.send_text(404, "not found\n")
+            return
+        with open(path, "rb") as f:
+            data = f.read()
+        ext = os.path.splitext(name)[1]
+        self.send_response(200)
+        self.send_header("Content-Type", MIME_TYPES.get(ext, "application/octet-stream"))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
+    def respond_admin(self):
+        """HTMX actions get the refreshed dashboard fragment; plain form posts
+        (no JS) fall back to a full-page redirect."""
+        if self.is_htmx():
+            self.send_html(200, self.render_dash())
+        else:
+            self.redirect("/")
 
     def handle_login_form(self):
         if self.is_authed():
@@ -372,11 +558,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.redirect("/ui/login", set_cookie=expired)
 
     # -- blob serving ------------------------------------------------------
+    def _blob_origin(self, parsed) -> str:
+        """Origin URL from either /blob?url=<origin> or /b/<base64>/<name>."""
+        if parsed.path.startswith("/b/"):
+            token = parsed.path[len("/b/"):].split("/", 1)[0]
+            try:
+                return base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return ""
+        return (urllib.parse.parse_qs(parsed.query).get("url") or [""])[0]
+
     def handle_blob(self, parsed, head_only: bool):
-        qs = urllib.parse.parse_qs(parsed.query)
-        url = (qs.get("url") or [""])[0]
+        url = self._blob_origin(parsed)
         if not url:
-            self.send_text(400, "missing ?url=\n")
+            self.send_text(400, "missing url\n")
             return
         row = self.store.get_blob(url)
         if row is None:
@@ -400,19 +595,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass  # client went away mid-stream
-
-    # -- admin -------------------------------------------------------------
-    def handle_admin_fetch(self, form):
-        url = form.get("url", "").strip()
-        if not url:
-            self.send_html(400, self.render_page(error="No URL provided."))
-            return
-        try:
-            self.store.store_from_origin(url)
-        except Exception as e:  # surface the failure to the operator
-            self.send_html(502, self.render_page(error=f"Fetch failed for {html.escape(url)}: {html.escape(str(e))}"))
-            return
-        self.redirect("/")
 
     # -- helpers -----------------------------------------------------------
     def read_form(self) -> dict:
@@ -446,116 +628,175 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     # -- HTML --------------------------------------------------------------
-    def render_login(self, error: str = "") -> str:
-        err = f'<div class="error">{error}</div>' if error else ""
+    STATUS_COLORS = {
+        "queued": "#888", "running": "var(--pico-primary, #0172ad)",
+        "completed": "#2e7d32", "failed": "#c0392b", "cancelled": "#888",
+    }
+
+    def _head(self, title: str) -> str:
         return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fromcache — login</title>{self._style()}
-</head><body>
-  <h1>fromcache</h1>
-  <p class="sub">operator login</p>
-  {err}
-  <form class="seed" method="post" action="/ui/login">
-    <input type="password" name="password" placeholder="admin password" autofocus required>
-    <button type="submit">Log in</button>
-  </form>
-</body></html>"""
+<title>{title}</title>
+<link rel="stylesheet" href="/static/pico.min.css">
+<script src="/static/htmx.min.js"></script>
+<style>
+  main.container {{ max-width: 1100px; padding-top: 1rem; }}
+  h4 {{ margin-bottom: .4rem; }}
+  table {{ font-size: .9rem; margin-bottom: 0; }}
+  .url {{ word-break: break-all; }}
+  .num {{ text-align: right; }}
+  .mono {{ font-family: var(--pico-font-family-monospace); font-size: .85em; }}
+  td form {{ display: inline; margin: 0; }}
+  td button {{ width: auto; display: inline-block; margin: 0 .3rem 0 0;
+               padding: .15rem .6rem; font-size: .8rem; }}
+  td progress {{ margin: 0 0 .15rem; }}
+  #spin {{ width: 7rem; height: .5rem; margin: 0; }}
+  .row {{ display: flex; align-items: center; justify-content: space-between; }}
+  .err {{ background: var(--pico-del-color, #c0392b); color: #fff;
+          padding: .7rem 1rem; border-radius: var(--pico-border-radius); margin-bottom: 1rem; }}
+</style>
+</head>"""
 
-    def render_page(self, error: str = "") -> str:
+    def render_login(self, error: str = "") -> str:
+        err = f'<div class="err">{html.escape(error)}</div>' if error else ""
+        return f"""{self._head("fromcache — login")}
+<body><main class="container">
+  <article style="max-width: 24rem; margin: 4rem auto;">
+    <hgroup><h2>fromcache</h2><p>operator login</p></hgroup>
+    {err}
+    <form method="post" action="/ui/login">
+      <input type="password" name="password" placeholder="Admin password" autofocus required>
+      <button type="submit">Log in</button>
+    </form>
+  </article>
+</main></body></html>"""
+
+    def render_page(self) -> str:
+        logout = (
+            '<li><form method="post" action="/ui/logout" style="margin:0">'
+            '<button type="submit" class="secondary outline" '
+            'style="width:auto;padding:.3rem .8rem">Log out</button></form></li>'
+            if self.auth.enabled else ""
+        )
+        return f"""{self._head("fromcache cache-host")}
+<body><main class="container">
+  <nav>
+    <ul><li><strong>fromcache</strong> &nbsp;<small>cache-host</small></li></ul>
+    <ul>
+      <li><progress id="spin" class="htmx-indicator"></progress></li>
+      {logout}
+    </ul>
+  </nav>
+
+  <h4>Add from URI</h4>
+  <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML"
+        hx-indicator="#spin" hx-on::after-request="this.reset()">
+    <fieldset role="group">
+      <input type="url" name="url" placeholder="https://origin/path/artifact.tar.gz" required>
+      <button type="submit">Fetch &amp; store</button>
+    </fieldset>
+  </form>
+
+  <div id="dash" hx-get="/admin/dash" hx-trigger="load, every 1s" hx-swap="innerHTML">
+    {self.render_dash()}
+  </div>
+</main></body></html>"""
+
+    def render_dash(self) -> str:
         nblobs, nmisses = self.store.counts()
+        jobs = self.mgr.list()
         misses = self.store.list_misses()
         blobs = self.store.list_blobs()
+
+        job_rows = "".join(self._job_row(j) for j in jobs) or \
+            '<tr><td colspan="4"><em>No downloads yet.</em></td></tr>'
 
         miss_rows = "".join(
             f"""<tr>
                 <td class="url">{html.escape(m["url"])}</td>
                 <td class="num">{m["count"]}</td>
-                <td>{html.escape(m["last_seen"])}</td>
-                <td class="actions">
-                  <form method="post" action="/admin/fetch">
+                <td><small>{html.escape(m["last_seen"])}</small></td>
+                <td>
+                  <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML" hx-indicator="#spin">
                     <input type="hidden" name="url" value="{html.escape(m["url"], quote=True)}">
                     <button type="submit">Download</button>
                   </form>
-                  <form method="post" action="/admin/dismiss">
+                  <form hx-post="/admin/dismiss" hx-target="#dash" hx-swap="innerHTML">
                     <input type="hidden" name="key" value="{html.escape(m["key"], quote=True)}">
-                    <button type="submit" class="ghost">Dismiss</button>
+                    <button type="submit" class="secondary outline">Dismiss</button>
                   </form>
                 </td>
             </tr>"""
             for m in misses
-        ) or '<tr><td colspan="4" class="empty">No misses recorded.</td></tr>'
+        ) or '<tr><td colspan="4"><em>No misses recorded.</em></td></tr>'
 
         blob_rows = "".join(
             f"""<tr>
                 <td class="url">{html.escape(b["url"])}</td>
                 <td>{human_size(b["size"])}</td>
                 <td class="mono">{html.escape(b["sha256"][:12])}…</td>
-                <td>{html.escape(b["fetched_at"])}</td>
+                <td><small>{html.escape(b["fetched_at"])}</small></td>
             </tr>"""
             for b in blobs
-        ) or '<tr><td colspan="4" class="empty">Cache is empty.</td></tr>'
+        ) or '<tr><td colspan="4"><em>Cache is empty.</em></td></tr>'
 
-        err = f'<div class="error">{error}</div>' if error else ""
-        logout = (
-            '<form method="post" action="/ui/logout" class="logout">'
-            '<button type="submit" class="ghost">Log out</button></form>'
-            if self.auth.enabled
-            else ""
-        )
+        return f"""
+  <p><small>{nblobs} cached &middot; {nmisses} pending miss(es)</small></p>
 
-        return f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fromcache cache-host</title>{self._style()}
-</head><body>
-  {logout}
-  <h1>fromcache cache-host</h1>
-  <p class="sub">{nblobs} cached &middot; {nmisses} pending miss(es)</p>
-  {err}
+  <div class="row">
+    <h4>Downloads</h4>
+    <form hx-post="/admin/clear" hx-target="#dash" hx-swap="innerHTML" style="margin:0">
+      <button type="submit" class="secondary outline" style="width:auto;padding:.2rem .7rem">
+        Clear finished</button>
+    </form>
+  </div>
+  <figure><table class="striped">
+    <thead><tr><th>Artifact</th><th>Progress</th><th>Status</th><th></th></tr></thead>
+    <tbody>{job_rows}</tbody>
+  </table></figure>
 
-  <h2>Add from URI</h2>
-  <form class="seed" method="post" action="/admin/fetch">
-    <input type="url" name="url" placeholder="https://origin/path/artifact.tar.gz" required>
-    <button type="submit">Fetch &amp; store</button>
-  </form>
-
-  <h2>Misses</h2>
-  <table>
-    <thead><tr><th>URL</th><th>Hits</th><th>Last seen</th><th>Action</th></tr></thead>
+  <h4>Misses</h4>
+  <figure><table class="striped">
+    <thead><tr><th>URL</th><th class="num">Hits</th><th>Last seen</th><th>Action</th></tr></thead>
     <tbody>{miss_rows}</tbody>
-  </table>
+  </table></figure>
 
-  <h2>Cached artifacts</h2>
-  <table>
+  <h4>Cached artifacts</h4>
+  <figure><table class="striped">
     <thead><tr><th>URL</th><th>Size</th><th>SHA-256</th><th>Fetched</th></tr></thead>
     <tbody>{blob_rows}</tbody>
-  </table>
-</body></html>"""
+  </table></figure>"""
 
-    @staticmethod
-    def _style() -> str:
-        return """
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 1000px; padding: 1.5rem; }
-  h1 { margin: 0; } h2 { margin-top: 2rem; }
-  .sub { color: #888; margin: .25rem 0 1.5rem; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid #8884; vertical-align: top; }
-  th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: #888; }
-  td.url { word-break: break-all; }
-  td.num { text-align: right; } td.mono { font-family: ui-monospace, monospace; }
-  td.empty { color: #888; font-style: italic; }
-  td.actions { white-space: nowrap; }
-  td.actions form { display: inline; }
-  button { font: inherit; padding: .25rem .7rem; cursor: pointer; }
-  button.ghost { background: transparent; border: 1px solid #8886; }
-  form.seed { display: flex; gap: .5rem; margin: 1rem 0 0; }
-  form.seed input { flex: 1; padding: .4rem .6rem; font: inherit; }
-  form.logout { float: right; margin: 0; }
-  .error { background: #c0392b; color: #fff; padding: .6rem .9rem; border-radius: 4px; margin: 1rem 0; }
-</style>"""
+    def _job_row(self, j: Job) -> str:
+        name = os.path.basename(urllib.parse.urlsplit(j.url).path) or j.url
+        if j.status == "running":
+            if j.bytes_total:
+                pct = int(j.bytes_done * 100 / j.bytes_total)
+                prog = (f'<progress value="{j.bytes_done}" max="{j.bytes_total}"></progress>'
+                        f'<small>{human_size(j.bytes_done)} / {human_size(j.bytes_total)} ({pct}%)</small>')
+            else:
+                prog = f'<progress></progress><small>{human_size(j.bytes_done)}</small>'
+        elif j.status == "completed":
+            prog = f'<small>{human_size(j.bytes_done)}</small>'
+        elif j.status == "failed":
+            prog = f'<small>{html.escape(j.error or "error")}</small>'
+        else:  # queued / cancelled
+            prog = "<small>—</small>"
+        cancel = ""
+        if j.status in PENDING_STATES:
+            cancel = (
+                '<form hx-post="/admin/cancel" hx-target="#dash" hx-swap="innerHTML">'
+                f'<input type="hidden" name="id" value="{j.id}">'
+                '<button type="submit" class="secondary outline">Cancel</button></form>'
+            )
+        color = self.STATUS_COLORS.get(j.status, "#888")
+        return f"""<tr>
+            <td class="url" title="{html.escape(j.url, quote=True)}">{html.escape(name)}</td>
+            <td>{prog}</td>
+            <td><small style="color:{color};font-weight:600">{j.status}</small></td>
+            <td>{cancel}</td>
+        </tr>"""
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -574,17 +815,21 @@ def main():
         help="include the URL query string in the cache key "
         "(default: drop it, so signed/tokened URLs still match by path)",
     )
+    ap.add_argument("--workers", type=int, default=2,
+                    help="concurrent background download workers (default: 2)")
     args = ap.parse_args()
 
     store = Store(args.data_dir, keep_query=args.keep_query)
     auth = Auth(resolve_secret(store.data_dir), os.environ.get("FROMCACHE_ADMIN_PASSWORD"))
+    mgr = DownloadManager(store, workers=args.workers)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.store = store  # type: ignore[attr-defined]
     httpd.auth = auth  # type: ignore[attr-defined]
+    httpd.mgr = mgr  # type: ignore[attr-defined]
     print(
         f"fromcache cache-host on http://{args.host}:{args.port}  "
-        f"(data={store.data_dir}, keep_query={args.keep_query})",
+        f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers})",
         flush=True,
     )
     if not auth.enabled:

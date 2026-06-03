@@ -8,14 +8,14 @@ version = "0.1.0"
 description = "Operator-curated, URL-keyed artifact cache for a small lab (CUDA/ROCm/DOCA/firmware)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "BSD-3-Clause" }
 authors = [{ name = "Simon A. F. Lund", email = "safl@safl.dk" }]
 keywords = ["cache", "artifacts", "cuda", "rocm", "doca", "firmware", "lab"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
     "Topic :: System :: Archiving :: Mirroring",
 ]
@@ -25,7 +25,8 @@ dependencies = []  # stdlib only, by design
 Homepage = "https://github.com/safl/fromcache"
 
 [project.scripts]
-fromcache = "fromcache.client:main"
+curlfromcache = "fromcache.curlfromcache:main"
+wgetfromcache = "fromcache.wgetfromcache:main"
 fromcache-server = "fromcache.server:main"
 
 [tool.hatch.build.targets.wheel]
