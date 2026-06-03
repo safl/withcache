@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fromcache"
-version = "0.1.0"
+dynamic = ["version"]  # single source of truth: src/fromcache/__init__.py:__version__
 description = "Operator-curated, URL-keyed artifact cache for a small lab (CUDA/ROCm/DOCA/firmware)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +29,9 @@ Homepage = "https://github.com/safl/fromcache"
 # them as the native binary (platform wheels) or Python launchers (pure wheel),
 # so the command name is one thing whichever way you installed.
 fromcache-server = "fromcache.server:main"
+
+[tool.hatch.version]
+path = "src/fromcache/__init__.py"  # the single source of truth
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fromcache"]

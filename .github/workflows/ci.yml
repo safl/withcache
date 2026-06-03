@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
 
+# Each step is a `make` target — reproduce any of this locally with the same command.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -16,8 +17,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check .
-      - run: ruff format --check .
+      - run: make lint format-check version-check
 
   test:
     runs-on: ${{ matrix.os }}
@@ -34,12 +34,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      # stdlib-only tests; curl is present on the runners, wget-probe test
-      # skips itself where wget is absent (e.g. macOS).
-      - run: python -m unittest discover -s tests -v
+      - run: make test
 
   # Build the native shim and run the suite WITH it present, so the
-  # differential test (Python oracle vs Zig binary) actually executes.
+  # Python-vs-Zig differential test actually executes.
   shim:
     runs-on: ubuntu-latest
     steps:
@@ -51,22 +49,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build native shim
-        working-directory: shim
-        run: zig build
-      - run: python -m unittest discover -s tests -v
+      - run: make shim test
 
   build:
-    runs-on: ubuntu-latest
     needs: [lint, test]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install build
-      - run: python -m build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/*
+      - run: make wheel

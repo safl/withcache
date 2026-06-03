@@ -1,5 +1,7 @@
 .{
     .name = .fromcache_shim,
+    // Zig requires a literal here; keep it in lockstep with the project's
+    // single source (src/fromcache/__init__.py) via `make bump` / `make version-check`.
     .version = "0.1.0",
     .fingerprint = 0x73774d8d30050d96,
     .minimum_zig_version = "0.16.0",

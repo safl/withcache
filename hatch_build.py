@@ -59,6 +59,8 @@ class CustomBuildHook(BuildHookInterface):
 
     # -- helpers ------------------------------------------------------------
     def _build_native(self):
+        if os.environ.get("FROMCACHE_NO_ZIG"):
+            return None  # force the pure py3-none-any wheel (Python launchers)
         zig = os.environ.get("ZIG") or shutil.which("zig")
         if not zig or not os.path.isdir(SHIM_DIR):
             return None

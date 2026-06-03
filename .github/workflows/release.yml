@@ -1,15 +1,48 @@
 name: release
+
+# Pushing a `v*` tag runs the full release: lint + test (incl. the Python-vs-Zig
+# differential test) gate it, then it builds the wheels + static shim binaries,
+# CREATES the GitHub release with them attached, and finally publishes to PyPI.
+# Same tag-triggered flow as safl/bty and safl/vfio-user-kvssd:
+#   make bump VERSION=0.2.0 && git commit -am '...' && git tag v0.2.0 && git push --tags
+#
+# `workflow_dispatch` runs the build only (no release/publish) as a smoke test.
+#
+# First publish needs a one-time PyPI Trusted Publisher (project fromcache,
+# workflow release.yml, environment pypi) — no API token required.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Everything is gated: publish/upload jobs `needs` the build jobs, which `needs`
-# lint+test — a release only ships if everything is green.
+# Build steps are `make` targets — reproduce with `make wheels` / `make binaries`.
 jobs:
+  # Refuse to re-release a version PyPI already has: PyPI is immutable, but a
+  # retag-after-publish would rebuild the GitHub release assets from a newer
+  # commit and silently drift from the frozen wheel. (bty's integrity guard.)
+  check-not-published:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Abort if PyPI already has this version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          echo "Checking PyPI for fromcache==${version}..."
+          if curl -sfL "https://pypi.org/pypi/fromcache/json" \
+             | python3 -c "import sys, json; sys.exit(0 if '${version}' in json.load(sys.stdin)['releases'] else 1)"; then
+            echo "::error::PyPI already has fromcache==${version}. Bump the version, retag, and push."
+            exit 1
+          fi
+          echo "OK: fromcache==${version} not on PyPI yet; release continues."
+
   lint:
+    needs: check-not-published
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,10 +50,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check .
-      - run: ruff format --check .
+      - run: make lint format-check version-check
 
   test:
+    needs: check-not-published
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -30,25 +63,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m unittest discover -s tests -v
+      - run: make test
 
-  # Platform wheels: one static musl binary per arch, tagged for BOTH glibc
-  # (manylinux) and musl (musllinux) — a static binary has no libc dep, so it
-  # runs under either. `pipx install fromcache` then gets the NATIVE shim.
-  wheels:
-    needs: [lint, test]
+  # Build the native shim and run the suite WITH it present, so the
+  # Python-vs-Zig differential test actually executes before we ship.
+  shim:
+    needs: check-not-published
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { ztarget: x86_64-linux-musl, wtag: py3-none-manylinux_2_17_x86_64 }
-          - { ztarget: x86_64-linux-musl, wtag: py3-none-musllinux_1_2_x86_64 }
-          - { ztarget: aarch64-linux-musl, wtag: py3-none-manylinux_2_17_aarch64 }
-          - { ztarget: aarch64-linux-musl, wtag: py3-none-musllinux_1_2_aarch64 }
     steps:
       - uses: actions/checkout@v4
-      # If 0.16.0 isn't yet a fetchable Zig release, pin to "master".
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: make shim test
+
+  # Platform wheels (static-musl binary, manylinux + musllinux tags) + the pure
+  # fallback wheel + sdist — `make wheels` loops the matrix internally.
+  wheels:
+    needs: [lint, test, shim]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -56,71 +94,68 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install build
-      - env:
-          FROMCACHE_ZIG_TARGET: ${{ matrix.ztarget }}
-          FROMCACHE_WHEEL_TAG: ${{ matrix.wtag }}
-        run: python -m build --wheel
+      - run: make wheels
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.wtag }}
-          path: dist/*.whl
+          name: dist
+          path: dist/*
 
-  # The universal fallback wheel (Python launchers) + the sdist. Built without
-  # zig, so the hook emits the pure py3-none-any wheel.
-  sdist:
-    needs: [lint, test]
+  # Raw static binaries (+ sha256) for Python-less boxes — `make binaries`
+  # builds + checksums both arches into dist-bin/.
+  binaries:
+    needs: [lint, test, shim]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: mlugg/setup-zig@v2
         with:
-          python-version: "3.12"
-      - run: pip install build
-      - run: python -m build
+          version: 0.16.0
+      - run: make binaries
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-pure
-          path: dist/*
+          name: dist-bin
+          path: dist-bin/*
 
-  publish:
-    needs: [wheels, sdist]
+  # Create the GitHub release at the tag and attach wheels + sdist + binaries.
+  release:
+    needs: [wheels, binaries]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    environment: pypi
+    permissions:
+      contents: write # softprops/action-gh-release creates the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-bin
+          path: dist-bin
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*
+            dist-bin/*
+
+  # Strictly last: PyPI is for life (a published version can't be re-uploaded),
+  # so we only ship there after the GitHub release page is up cleanly.
+  publish-pypi:
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/fromcache
     permissions:
       id-token: write # OIDC for PyPI Trusted Publishing — no API token needed
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: dist-*
-          merge-multiple: true
+          name: dist
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
-
-  # Also attach the raw static binaries to the GitHub Release, for boxes with
-  # no Python/pip (minimal/distroless images). One binary serves both tools.
-  binaries:
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-linux-musl, aarch64-linux-musl]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
-      - name: Build static binary
-        working-directory: shim
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall -Dstatic
-      - name: Stage + checksum
-        run: |
-          mkdir -p out
-          cp shim/zig-out/bin/fromcache-shim out/fromcache-shim-${{ matrix.target }}
-          ( cd out && sha256sum fromcache-shim-${{ matrix.target }} > fromcache-shim-${{ matrix.target }}.sha256 )
-      - name: Attach to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" out/* --clobber
+          skip-existing: true # idempotent if a retry re-uploads
