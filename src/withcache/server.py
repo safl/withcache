@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""withcache cache-host — an operator-curated artifact cache.
+"""withcache cache-host — a URL-keyed artifact cache.
 
 Stdlib only (http.server + sqlite3 + urllib). Serves cached blobs keyed by
-their origin URL. A cache miss is *not* fetched automatically: it is recorded
-in a miss table so an operator can review it and press "Download", at which
-point the cache-host pulls the artifact from origin and stores it. There is
-also an "add from URI" form to pre-seed an artifact before anyone misses it.
+their origin URL. By default a cache miss is auto-fetched: it is recorded in the
+miss table and pulled from origin in the background, so the next request hits
+(the client falls through to origin on the first miss). Run with `--curate` to
+require an operator to approve each pull via a small web UI instead; either way
+you can pre-seed an artifact with the "Add from URI" form.
 
 This is the only component that needs internet egress (and any vendor creds).
 Clients never write to it.
 
-Auth (modelled on bty's single-tenant approach, minus PAM): the read path
+Auth (single-tenant: env password + signed cookie): the read path
 (`/blob`, `/healthz`) is open so clients never log in; the operator surface
 (`/` and `/admin/*`) is gated behind a server-signed session cookie. Login at
 `POST /ui/login` checks the password in $WITHCACHE_ADMIN_PASSWORD and flips the
