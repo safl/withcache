@@ -116,6 +116,42 @@ jobs:
           name: dist-bin
           path: dist-bin/*
 
+  # Multi-arch cache-host container -> ghcr.io/safl/withcache. Lets it run as a
+  # service (e.g. alongside bty) without a from-source build. Gated like the
+  # other artifact jobs; independent of the GitHub release.
+  publish-image:
+    needs: [lint, test, shim]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3 # arm64 via emulation on the amd64 runner
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Version from tag
+        id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/safl/withcache:${{ steps.v.outputs.version }}
+            ghcr.io/safl/withcache:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # Create the GitHub release at the tag and attach wheels + sdist + binaries.
   release:
     needs: [wheels, binaries]
