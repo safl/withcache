@@ -1,11 +1,17 @@
 """withcache — operator-curated, URL-keyed artifact cache for a small lab.
 
-Two console entry points (see pyproject.toml):
-  withcache         -> withcache.client:main   (the cache-aware downloader)
-  withcache-server  -> withcache.server:main   (the cache-host)
+- ``withcache-server`` (withcache.server:main): the cache-host.
+- ``curlwithcache`` / ``wgetwithcache``: transparent curl/wget shims, shipped
+  as a native binary or a Python launcher (see hatch_build.py).
+- ``withcache.client``: a tiny, stdlib-only library for other tools to consume
+  a cache-host (build serve URLs, probe what's cached) without re-implementing
+  the ``/b/`` URL scheme.
 
-Both modules are stdlib-only and self-contained, so either file can also be
-copied and run on its own with a plain ``python3``.
+All modules are stdlib-only and self-contained.
 """
 
+from .client import blob_url, cache_base, is_cached, serve_url
+
 __version__ = "0.2.0"
+
+__all__ = ["__version__", "blob_url", "cache_base", "is_cached", "serve_url"]
