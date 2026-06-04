@@ -1,0 +1,38 @@
+name: tag-on-version-change
+
+# Minimal release trigger. When a version bump lands on main, create the
+# matching v<version> tag, which fires ci-cd.yml's tag-gated publish jobs. So
+# the flow is: bump the version in a PR (`make bump VERSION=...`); merging that
+# PR releases. Idempotent: a no-op when the tag already exists.
+#
+# Requires a repo secret RELEASE_PAT (a token with contents:write). Tags pushed
+# with the default GITHUB_TOKEN do NOT trigger another workflow, so ci-cd.yml's
+# `on: push: tags` would never fire; pushing the tag with a PAT does.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
+      - name: Tag the version if it is new
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/withcache/__init__.py)
+          test -n "$version" || { echo "could not read __version__"; exit 1; }
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "${tag} already exists; nothing to do."
+            exit 0
+          fi
+          git tag "${tag}"
+          git push origin "${tag}"
+          echo "Tagged ${tag}; ci-cd.yml will publish it."
