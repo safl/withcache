@@ -4,8 +4,11 @@
 FROM python:3.12-slim
 
 # Install the package (no third-party deps) to get the withcache-server command.
+# hatch_build.py is the wheel build hook (ships the shims); without it the build
+# fails. No zig in this image, so the shims install as Python launchers, which
+# is fine -- the container only runs withcache-server.
 WORKDIR /app
-COPY pyproject.toml README.md /app/
+COPY pyproject.toml README.md hatch_build.py /app/
 COPY src /app/src
 RUN pip install --no-cache-dir /app
 
