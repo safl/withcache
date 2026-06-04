@@ -4,11 +4,13 @@ name: ci
 # differential test, wheels, static binaries, the container image) runs on every
 # PR and on pushes to `main`, catching issues before they land. Pushing a `v*`
 # tag runs the same suite and additionally publishes; the publish jobs are
-# tag-gated. Release flow:
-#   make bump VERSION=0.3.0 && git commit -am '...' && git tag v0.3.0 && git push --tags
+# tag-gated. Release flow: bump the version in a PR (`make bump VERSION=...`) and
+# merge it; on a green `main` build the `tag-release` job tags `v<version>`, which
+# fires the publish jobs. No manual tagging, and a red `main` never gets tagged.
 #
 # First publish needs a one-time PyPI Trusted Publisher (project withcache,
-# workflow ci-cd.yml, environment pypi).
+# workflow ci-cd.yml, environment pypi) and a RELEASE_PAT secret (the tag push
+# uses it so the new tag triggers this workflow's publish jobs).
 on:
   pull_request:
   push:
@@ -121,6 +123,35 @@ jobs:
         with:
           name: dist-bin
           path: dist-bin/*
+
+  # On a green main build, tag a new version so the publish jobs (which run on
+  # the tag) fire. Gated on the full suite via `needs`, so a red main never gets
+  # tagged. The tag is pushed with RELEASE_PAT because a GITHUB_TOKEN push would
+  # not trigger this workflow.
+  tag-release:
+    needs: [lint, test, shim, wheels, binaries]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
+      - name: Tag the version if it is new
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/withcache/__init__.py)
+          test -n "$version" || { echo "could not read __version__"; exit 1; }
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "${tag} already exists; nothing to do."
+            exit 0
+          fi
+          git tag "${tag}"
+          git push origin "${tag}"
+          echo "Tagged ${tag}; ci-cd.yml will publish it."
 
   # Multi-arch cache-host container -> ghcr.io/safl/withcache. Lets it run as a
   # service (e.g. alongside bty) without a from-source build. Gated like the
