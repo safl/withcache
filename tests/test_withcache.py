@@ -19,7 +19,7 @@ import base64  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 
-from withcache import _shim, curlwithcache, server, wgetwithcache  # noqa: E402
+from withcache import _shim, client, curlwithcache, server, wgetwithcache  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -499,6 +499,44 @@ class TestParsers(unittest.TestCase):
             server.parse_headers("Authorization: Bearer x"), {"Authorization": "Bearer x"}
         )
         self.assertEqual(server.parse_headers("A: 1\nB: 2"), {"A": "1", "B": "2"})
+
+
+# --------------------------------------------------------------------------
+# Client library: what a consumer (e.g. bty) imports instead of reimplementing
+# the /b/ protocol.
+# --------------------------------------------------------------------------
+class TestClientLibrary(unittest.TestCase):
+    def setUp(self):
+        self.origin = socketserver.TCPServer(("127.0.0.1", 0), _Origin)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/art.bin"
+        self.httpd, self.store = _start_withcache()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        for s in (self.origin, self.httpd):
+            s.shutdown()
+            s.server_close()
+
+    def test_blob_url_matches_shim_and_normalizes_server(self):
+        # accepts a host/host:port/http URL and emits the same /b/ URL as the shim
+        self.assertEqual(
+            client.blob_url(self.base, self.origin_url),
+            _shim.blob_url(_shim.cache_base(self.base), self.origin_url),
+        )
+
+    def test_is_cached_and_serve_url_track_the_cache(self):
+        self.assertFalse(client.is_cached(self.base, self.origin_url))
+        self.assertIsNone(client.serve_url(self.base, self.origin_url))
+        self.store.store_from_origin(self.origin_url)  # warm it
+        self.assertTrue(client.is_cached(self.base, self.origin_url))
+        self.assertEqual(
+            client.serve_url(self.base, self.origin_url),
+            client.blob_url(self.base, self.origin_url),
+        )
+
+    def test_is_cached_unreachable_is_false(self):
+        self.assertFalse(client.is_cached("http://127.0.0.1:9", self.origin_url, timeout=0.5))
 
 
 if __name__ == "__main__":

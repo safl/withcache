@@ -248,6 +248,25 @@ CDN/presigned URLs (whose tokens change every request) still match by path. Pass
 (`.deb`/`.rpm`) are GPG-signed and verified by the client regardless of
 transport, so caching them this way is safe.
 
+## Consume from another tool (the client library)
+
+A tool that already knows its download URLs (e.g. an installer or a provisioner)
+can prefer the cache without shelling out to a shim or re-implementing the `/b/`
+scheme. `withcache.client` is stdlib-only, so importing it adds no dependencies:
+
+```python
+from withcache import client
+
+# "use the cache when it's warm, the origin otherwise"
+url = client.serve_url("http://cache:3000", origin) or origin
+```
+
+`is_cached()` is a graceful `HEAD` (a miss, timeout, or unreachable cache all
+return `False`, so you fall back to the origin), and it doubles as a warm-up:
+the probe records the miss and, in auto-fetch mode, enqueues the fill, so the
+next call flips to the cache. The encoding is shared with the shims and server,
+so consumers stay in lockstep with the cache-host.
+
 ## Tests
 
 ```sh
