@@ -1,17 +1,18 @@
-name: release
+name: ci
 
-# Pushing a `v*` tag runs the full release: lint + test (incl. the Python-vs-Zig
-# differential test) gate it, then it builds the wheels + static shim binaries,
-# CREATES the GitHub release with them attached, and finally publishes to PyPI.
-# Same tag-triggered flow as safl/bty and safl/vfio-user-kvssd:
-#   make bump VERSION=0.2.0 && git commit -am '...' && git tag v0.2.0 && git push --tags
-#
-# `workflow_dispatch` runs the build only (no release/publish) as a smoke test.
+# Single unified pipeline. The full build + test suite (lint, the Python-vs-Zig
+# differential test, wheels, static binaries, the container image) runs on every
+# PR and on pushes to `main`, catching issues before they land. Pushing a `v*`
+# tag runs the same suite and additionally publishes; the publish jobs are
+# tag-gated. Release flow:
+#   make bump VERSION=0.3.0 && git commit -am '...' && git tag v0.3.0 && git push --tags
 #
 # First publish needs a one-time PyPI Trusted Publisher (project withcache,
-# workflow release.yml, environment pypi) — no API token required.
+# workflow release.yml, environment pypi).
 on:
+  pull_request:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -54,10 +55,15 @@ jobs:
 
   test:
     needs: check-not-published
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
