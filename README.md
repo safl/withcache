@@ -1,6 +1,6 @@
 # withcache
 
-[![ci](https://github.com/safl/withcache/actions/workflows/ci.yml/badge.svg)](https://github.com/safl/withcache/actions/workflows/ci.yml)
+[![ci](https://github.com/safl/withcache/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/safl/withcache/actions/workflows/ci-cd.yml)
 [![PyPI](https://img.shields.io/pypi/v/withcache.svg)](https://pypi.org/project/withcache/)
 [![license](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 [![built with Zig](https://img.shields.io/badge/built%20with-Zig%200.16.0-f7a41d.svg)](https://ziglang.org)
