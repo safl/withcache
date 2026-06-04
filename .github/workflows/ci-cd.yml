@@ -8,7 +8,7 @@ name: ci
 #   make bump VERSION=0.3.0 && git commit -am '...' && git tag v0.3.0 && git push --tags
 #
 # First publish needs a one-time PyPI Trusted Publisher (project withcache,
-# workflow release.yml, environment pypi).
+# workflow ci-cd.yml, environment pypi).
 on:
   pull_request:
   push:
