@@ -37,13 +37,31 @@ def blob_url(server: str, origin: str) -> str:
     return _shim.blob_url(_shim.cache_base(server), origin)
 
 
-def is_cached(server: str, origin: str, timeout: float = PROBE_TIMEOUT) -> bool:
+def is_cached(
+    server: str,
+    origin: str,
+    timeout: float = PROBE_TIMEOUT,
+    headers: dict[str, str] | None = None,
+) -> bool:
     """True if the cache-host already holds ``origin`` (a ``HEAD`` on ``/b/``
     returns 200). A miss (404), an unreachable host, a timeout, or any error
     returns False, so a caller can safely fall back to the origin. The HEAD
     also *warms* an auto-fetch cache-host: the miss is recorded and the
-    background fill enqueued, so a later probe flips to cached."""
+    background fill enqueued, so a later probe flips to cached.
+
+    ``headers`` (optional) attaches request headers to the HEAD. The
+    cache-host forwards a client-supplied ``Authorization`` into its
+    background-fetch worker, so a consumer that has just minted an OCI
+    bearer (the typical use case: bty resolving an ``oras://`` catalog
+    entry to a ``ghcr.io`` blob URL at import time) can warm the cache
+    against that token-gated origin in one probe. Other entries in
+    ``headers`` round-trip the same way; only ``Authorization`` is
+    forwarded into the fetch on the server side.
+    """
     req = urllib.request.Request(blob_url(server, origin), method="HEAD")
+    if headers:
+        for k, v in headers.items():
+            req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return bool(resp.status == 200)
@@ -53,10 +71,19 @@ def is_cached(server: str, origin: str, timeout: float = PROBE_TIMEOUT) -> bool:
         return False  # unreachable / timeout -> caller serves the origin itself
 
 
-def serve_url(server: str, origin: str, timeout: float = PROBE_TIMEOUT) -> str | None:
+def serve_url(
+    server: str,
+    origin: str,
+    timeout: float = PROBE_TIMEOUT,
+    headers: dict[str, str] | None = None,
+) -> str | None:
     """The cache-host serve URL for ``origin`` if the cache holds it, else
     ``None`` -- the convenience form of "use the cache when warm":
 
         url = client.serve_url(cache, origin) or origin
+
+    ``headers`` is passed through to :func:`is_cached` for the HEAD probe;
+    the returned serve URL never carries auth (cached bytes are served
+    without revisiting the origin).
     """
-    return blob_url(server, origin) if is_cached(server, origin, timeout) else None
+    return blob_url(server, origin) if is_cached(server, origin, timeout, headers=headers) else None
