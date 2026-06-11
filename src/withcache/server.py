@@ -664,7 +664,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # falls through on a miss). In --curate mode an operator triggers
                 # the pull instead; when the cache is full we record the miss but
                 # schedule nothing (delete something first).
-                self.mgr.enqueue(url)
+                #
+                # Forward the client's ``Authorization`` header into the worker
+                # job so a token-gated origin (typical use case: a fresh OCI
+                # bearer on a ghcr.io blob URL minted by bty-web at catalog
+                # import time) can be fetched. Without this the worker runs
+                # anonymous and 401s; the URL stays uncached forever. Keep the
+                # allowlist narrow on purpose: ``Authorization`` is the only
+                # request header we proxy onto the worker. The ``/admin/fetch``
+                # operator endpoint still carries its own ``headers=`` payload
+                # for the curated path.
+                fwd_headers = None
+                auth = self.headers.get("Authorization")
+                if auth:
+                    fwd_headers = {"Authorization": auth}
+                self.mgr.enqueue(url, headers=fwd_headers)
             self.send_text(404, "cache miss (recorded)\n")
             return
         path = self.store.blob_path(row["key"])
