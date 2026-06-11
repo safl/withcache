@@ -11,6 +11,7 @@ import socketserver
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -483,6 +484,60 @@ class TestFetchWithHeaders(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# HEAD with an Authorization header should propagate that header into the
+# auto-fetch worker so a 401-gated origin (e.g. a ghcr.io blob URL behind a
+# bty-minted OCI bearer) actually fills. Without this propagation the worker
+# pulls anonymous, the origin 401s, and the URL stays uncached forever.
+# --------------------------------------------------------------------------
+class TestHeadForwardsAuthorizationToAutoFetch(unittest.TestCase):
+    def setUp(self):
+        self.origin = socketserver.TCPServer(("127.0.0.1", 0), _AuthOrigin)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/blob.bin"
+        self.httpd, self.store = _start_withcache(auto_fetch=True)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        for s in (self.origin, self.httpd):
+            s.shutdown()
+            s.server_close()
+
+    def _wait_for_fill(self, timeout_s=2.0):
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.store.get_blob(self.origin_url) is not None:
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_head_with_authorization_triggers_authed_fetch(self):
+        bu = _shim.blob_url(self.base, self.origin_url)
+        req = urllib.request.Request(bu, method="HEAD")
+        req.add_header("Authorization", _AuthOrigin.TOKEN)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req)
+        self.assertEqual(cm.exception.code, 404)  # miss; recorded + enqueued
+        # The worker should have fetched in the background using the header.
+        self.assertTrue(
+            self._wait_for_fill(),
+            "expected blob to be cached after auth-bearing HEAD",
+        )
+
+    def test_head_without_authorization_leaves_origin_401_and_cache_empty(self):
+        # Negative: no Authorization on the HEAD means the worker is enqueued
+        # anonymous, the origin 401s, nothing lands. Verifies the new code
+        # path is genuinely opt-in (HEAD without auth keeps the old behaviour).
+        bu = _shim.blob_url(self.base, self.origin_url)
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(urllib.request.Request(bu, method="HEAD"))
+        self.assertEqual(cm.exception.code, 404)
+        self.assertFalse(
+            self._wait_for_fill(timeout_s=0.5),
+            "expected no blob without forwarded auth",
+        )
+
+
+# --------------------------------------------------------------------------
 # Pure helpers
 # --------------------------------------------------------------------------
 class TestParsers(unittest.TestCase):
@@ -537,6 +592,62 @@ class TestClientLibrary(unittest.TestCase):
 
     def test_is_cached_unreachable_is_false(self):
         self.assertFalse(client.is_cached("http://127.0.0.1:9", self.origin_url, timeout=0.5))
+
+
+# --------------------------------------------------------------------------
+# Client + server end-to-end: a HEAD with ``headers={"Authorization": ...}``
+# warms the cache against a 401-gated origin. Mirrors the bty oras case
+# (resolved ghcr.io blob URL + freshly-minted OCI bearer).
+# --------------------------------------------------------------------------
+class TestClientLibraryAuthForwarding(unittest.TestCase):
+    def setUp(self):
+        self.origin = socketserver.TCPServer(("127.0.0.1", 0), _AuthOrigin)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        self.origin_url = f"http://127.0.0.1:{self.origin.server_address[1]}/blob.bin"
+        self.httpd, self.store = _start_withcache(auto_fetch=True)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        for s in (self.origin, self.httpd):
+            s.shutdown()
+            s.server_close()
+
+    def test_is_cached_with_authorization_warms_auth_gated_origin(self):
+        # Cold: no auth -> background fetch goes anonymous, 401s, cache empty.
+        self.assertFalse(client.is_cached(self.base, self.origin_url))
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if self.store.get_blob(self.origin_url) is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNone(self.store.get_blob(self.origin_url))
+
+        # Warm-with-token: HEAD carries Authorization; server forwards it
+        # into the fetch worker; the auth-gated origin returns the bytes.
+        self.assertFalse(
+            client.is_cached(
+                self.base,
+                self.origin_url,
+                headers={"Authorization": _AuthOrigin.TOKEN},
+            )
+        )
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if self.store.get_blob(self.origin_url) is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(
+            self.store.get_blob(self.origin_url),
+            "expected auth-bearing HEAD to fill the cache via forwarded Authorization",
+        )
+
+        # And once cached, the auth header is no longer needed: a plain HEAD
+        # hits 200, serve_url returns the blob URL without auth.
+        self.assertTrue(client.is_cached(self.base, self.origin_url))
+        self.assertEqual(
+            client.serve_url(self.base, self.origin_url),
+            client.blob_url(self.base, self.origin_url),
+        )
 
 
 if __name__ == "__main__":
