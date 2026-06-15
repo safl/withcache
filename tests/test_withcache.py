@@ -7,6 +7,7 @@ without an install.
 import http.server
 import os
 import shutil
+import socket
 import socketserver
 import sys
 import tempfile
@@ -165,6 +166,78 @@ class TestStoreFromOrigin(unittest.TestCase):
         self.assertFalse(store.has_capacity())  # now over the 1-byte cap
         with self.assertRaises(server.CacheFull):
             store.store_from_origin(f"http://127.0.0.1:{self.port}/b.bin")
+
+
+class _TruncatingOrigin(http.server.BaseHTTPRequestHandler):
+    """Declare a full Content-Length, then send half the payload and
+    close the socket. Mirrors the real-world failure mode where the
+    upstream drops the connection mid-stream (lab-box fedora-44-desktop
+    flash that surfaced this bug)."""
+
+    PAYLOAD = b"abcdefghij" * 100  # 1000 bytes; will write half then close
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(self.PAYLOAD)))
+        self.end_headers()
+        half = len(self.PAYLOAD) // 2
+        self.wfile.write(self.PAYLOAD[:half])
+        # close the underlying socket so urllib observes EOF before
+        # Content-Length bytes arrive
+        self.wfile.flush()
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestTruncatedDownloadRejected(unittest.TestCase):
+    """Regression for the lab-spotted bug where a transport-aborted
+    upstream stream silently became a permanent cached blob: future
+    HEADs returned 200 with the partial bytes, every consumer got a
+    malformed file, and the only escape was hand-deleting the blob.
+    Content-Length mismatches now fail loudly and leave no entry."""
+
+    def setUp(self):
+        self.httpd = socketserver.TCPServer(("127.0.0.1", 0), _TruncatingOrigin)
+        self.port = self.httpd.server_address[1]
+        self.t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.t.start()
+        self.store = server.Store(tempfile.mkdtemp(), keep_query=False)
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_truncated_upstream_raises_and_leaves_no_blob(self):
+        url = f"http://127.0.0.1:{self.port}/truncated.bin"
+        with self.assertRaises(server.TruncatedDownload) as cm:
+            self.store.store_from_origin(url)
+        # the message must name both totals so the operator can see
+        # how short the upstream came
+        msg = str(cm.exception)
+        self.assertIn("1000", msg)  # declared
+        self.assertIn("500", msg)  # got
+        # no row was written; no blob file lingers on disk
+        self.assertIsNone(self.store.get_blob(url))
+        blobs = list(self.store.blob_path("").rsplit("/", 1)[0:1])
+        if os.path.isdir(blobs[0]):
+            self.assertEqual(os.listdir(blobs[0]), [])
+
+    def test_repeat_request_after_truncation_can_retry_cleanly(self):
+        url = f"http://127.0.0.1:{self.port}/truncated.bin"
+        with self.assertRaises(server.TruncatedDownload):
+            self.store.store_from_origin(url)
+        # second attempt against the same URL would have hit the
+        # poisoned cache before the fix; now it must repeat the
+        # failure mode (no sticky blob blocking the retry) so a
+        # later origin recovery can re-fill the entry cleanly.
+        with self.assertRaises(server.TruncatedDownload):
+            self.store.store_from_origin(url)
 
 
 # --------------------------------------------------------------------------

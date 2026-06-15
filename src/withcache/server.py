@@ -325,6 +325,17 @@ class Store:
                         size += len(chunk)
                         if progress:
                             progress(size, total)
+            # urllib's read loop exits on clean EOF AND on transport-
+            # aborted close; HTTPResponse only raises IncompleteRead
+            # in some configurations. When the origin declared
+            # Content-Length, treat that as the contract and refuse
+            # to promote a short blob. A silent partial-promotion
+            # would serve malformed bytes to every future consumer
+            # with no way for them to invalidate the entry.
+            if total is not None and size != total:
+                raise TruncatedDownload(
+                    f"upstream truncated for {url}: declared {total} bytes, got {size}"
+                )
             os.replace(tmp, self.blob_path(key))
         except BaseException:
             if os.path.exists(tmp):
@@ -367,6 +378,14 @@ class DownloadCancelled(Exception):
 
 class CacheFull(Exception):
     """Raised when --max-bytes is reached; the fill is refused, not evicted."""
+
+
+class TruncatedDownload(Exception):
+    """Raised when the upstream stream ended before the declared
+    Content-Length. The temp file is removed and no blob row is
+    written, so the same URL re-enqueues cleanly on the next request
+    instead of permanently serving a malformed file.
+    """
 
 
 @dataclass
