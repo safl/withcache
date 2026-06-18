@@ -41,8 +41,10 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from . import __version__
+
 CHUNK = 64 * 1024
-USER_AGENT = "withcache-cache/0.1"
+USER_AGENT = f"withcache-cache/{__version__}"
 # Resume budget for a single store_from_origin call. A truncated
 # upstream stream re-fetches with ``Range: bytes=<got>-`` so the
 # next attempt picks up where the cut happened. Five tries cover
@@ -566,7 +568,7 @@ def _set_progress(job: Job, done: int, total: int | None):
 # HTTP handler
 # --------------------------------------------------------------------------
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "withcache/0.1"
+    server_version = f"withcache/{__version__}"
     protocol_version = "HTTP/1.1"
 
     @property
@@ -859,7 +861,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return f"""{self._head("withcache — login")}
 <body><main class="container">
   <article style="max-width: 24rem; margin: 4rem auto;">
-    <hgroup><h2>withcache</h2><p>operator login</p></hgroup>
+    <hgroup>
+      <h2>withcache <small class="mono">v{html.escape(__version__)}</small></h2>
+      <p>operator login</p>
+    </hgroup>
     {err}
     <form method="post" action="/ui/login">
       <input type="password" name="password" placeholder="Admin password" autofocus required>
@@ -879,7 +884,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return f"""{self._head("withcache cache-host")}
 <body><main class="container">
   <nav>
-    <ul><li><strong>withcache</strong> &nbsp;<small>cache-host</small></li></ul>
+    <ul><li>
+      <strong>withcache</strong> &nbsp;<small>cache-host</small>
+      &nbsp;<small class="mono">v{html.escape(__version__)}</small>
+    </li></ul>
     <ul>
       <li><progress id="spin" class="htmx-indicator"></progress></li>
       {logout}
