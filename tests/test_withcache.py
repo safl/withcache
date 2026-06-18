@@ -215,8 +215,12 @@ class TestTruncatedDownloadRejected(unittest.TestCase):
 
     def test_truncated_upstream_raises_and_leaves_no_blob(self):
         url = f"http://127.0.0.1:{self.port}/truncated.bin"
+        # _TruncatingOrigin truncates EVERY response (including
+        # ranged retries) so capping max_resume_attempts at 1 keeps
+        # the test fast: the single attempt cuts at 500 bytes,
+        # exhausts the budget, and the TruncatedDownload fires.
         with self.assertRaises(server.TruncatedDownload) as cm:
-            self.store.store_from_origin(url)
+            self.store.store_from_origin(url, max_resume_attempts=1)
         # the message must name both totals so the operator can see
         # how short the upstream came
         msg = str(cm.exception)
@@ -231,13 +235,139 @@ class TestTruncatedDownloadRejected(unittest.TestCase):
     def test_repeat_request_after_truncation_can_retry_cleanly(self):
         url = f"http://127.0.0.1:{self.port}/truncated.bin"
         with self.assertRaises(server.TruncatedDownload):
-            self.store.store_from_origin(url)
+            self.store.store_from_origin(url, max_resume_attempts=1)
         # second attempt against the same URL would have hit the
         # poisoned cache before the fix; now it must repeat the
         # failure mode (no sticky blob blocking the retry) so a
         # later origin recovery can re-fill the entry cleanly.
         with self.assertRaises(server.TruncatedDownload):
-            self.store.store_from_origin(url)
+            self.store.store_from_origin(url, max_resume_attempts=1)
+
+
+# --------------------------------------------------------------------------
+# Range-resume: a flaky upstream that cuts mid-stream MUST be retried with
+# ``Range: bytes=<got>-`` so the partial is filled rather than discarded.
+# This is the lab-spotted ghcr.io failure mode where Azure Blob Storage
+# SAS URLs expire mid-download for any blob bigger than a few minutes of
+# bandwidth: a single attempt always loses, but a retried Range request
+# starts a fresh SAS window and the second leg finishes the blob.
+# --------------------------------------------------------------------------
+class _ResumableTruncatingOrigin(http.server.BaseHTTPRequestHandler):
+    """Cut the FIRST GET in half; honor ``Range: bytes=<n>-`` on retries
+    by serving from offset n to end. Mirrors the ghcr -> Azure Blob
+    pattern: each connection has a hard wall-clock limit but the bytes
+    themselves are available on re-fetch.
+
+    Shared class-level counter so multiple instances (the threaded server
+    spawns one handler per request) all see the same call count and the
+    first GET truncates regardless of which thread services it.
+    """
+
+    PAYLOAD = b"abcdefghij" * 100  # 1000 bytes
+    _lock = threading.Lock()
+    _calls = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        with cls._lock:
+            cls._calls = 0
+
+    def do_GET(self):
+        with self._lock:
+            self.__class__._calls += 1
+            call = self._calls
+        rng = self.headers.get("Range") or ""
+        start = 0
+        if rng.startswith("bytes="):
+            try:
+                start = int(rng[len("bytes=") :].split("-", 1)[0])
+            except ValueError:
+                start = 0
+        full = len(self.PAYLOAD)
+        if start > 0:
+            # ranged retry: serve the rest cleanly
+            body = self.PAYLOAD[start:]
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header(
+                "Content-Range",
+                f"bytes {start}-{full - 1}/{full}",
+            )
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        # first attempt: declare full length but cut at half
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(full))
+        self.end_headers()
+        if call == 1:
+            half = full // 2
+            self.wfile.write(self.PAYLOAD[:half])
+            self.wfile.flush()
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        else:
+            # any non-ranged retry serves the whole thing (covers the
+            # 200-on-Range fallback path: origin ignored Range, we
+            # restart from 0)
+            self.wfile.write(self.PAYLOAD)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestRangeResumeOnTruncation(unittest.TestCase):
+    def setUp(self):
+        _ResumableTruncatingOrigin.reset()
+        self.httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _ResumableTruncatingOrigin)
+        self.port = self.httpd.server_address[1]
+        self.t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.t.start()
+        self.store = server.Store(tempfile.mkdtemp(), keep_query=False)
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_truncated_stream_resumes_via_range(self):
+        """First GET cuts at byte 500; second GET (with
+        ``Range: bytes=500-``) returns 206 and the remaining 500.
+        Result: a complete 1000-byte blob in the cache, sha256 matches
+        the upstream's full payload, no TruncatedDownload raised."""
+        import hashlib
+
+        url = f"http://127.0.0.1:{self.port}/resumable.bin"
+        row = self.store.store_from_origin(url)
+        self.assertEqual(row["size"], len(_ResumableTruncatingOrigin.PAYLOAD))
+        self.assertEqual(
+            row["sha256"],
+            hashlib.sha256(_ResumableTruncatingOrigin.PAYLOAD).hexdigest(),
+        )
+        with open(self.store.blob_path(row["key"]), "rb") as f:
+            self.assertEqual(f.read(), _ResumableTruncatingOrigin.PAYLOAD)
+
+    def test_progress_callback_reports_continuing_offset_on_resume(self):
+        """Progress reports must be monotonic across the resume: the
+        second leg's reads start at 500 (the partial-so-far) and walk
+        up to 1000, NOT restart at 0. An operator dashboard watching
+        ``progress`` for a stuck job needs to see the bytes climb."""
+        observed: list[tuple[int, int | None]] = []
+        url = f"http://127.0.0.1:{self.port}/resumable.bin"
+        self.store.store_from_origin(url, progress=lambda d, t: observed.append((d, t)))
+        # final report should be the full payload
+        self.assertEqual(observed[-1][0], len(_ResumableTruncatingOrigin.PAYLOAD))
+        # at no point did the byte counter regress
+        for prev, curr in zip(observed, observed[1:], strict=False):
+            self.assertGreaterEqual(curr[0], prev[0])
+        # the resume actually crossed the cut point: at least one
+        # progress call lands above the half-mark (otherwise we
+        # would have stalled at 500)
+        half = len(_ResumableTruncatingOrigin.PAYLOAD) // 2
+        self.assertTrue(any(d > half for d, _ in observed))
 
 
 # --------------------------------------------------------------------------

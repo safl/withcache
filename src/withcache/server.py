@@ -43,6 +43,16 @@ from datetime import datetime, timezone
 
 CHUNK = 64 * 1024
 USER_AGENT = "withcache-cache/0.1"
+# Resume budget for a single store_from_origin call. A truncated
+# upstream stream re-fetches with ``Range: bytes=<got>-`` so the
+# next attempt picks up where the cut happened. Five tries cover
+# the realistic failure mode (e.g. ghcr.io serves blobs via Azure
+# Blob Storage SAS URLs with a ~10 minute expiry; a >2 GiB image
+# at modest bandwidth blows past one window and the connection is
+# cut server-side, but a fresh redirect through ghcr yields a new
+# SAS URL each retry). The cap is the give-up gate, not a normal
+# operating depth.
+RESUME_MAX_ATTEMPTS = 5
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME_TYPES = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8"}
 _DB_WRITE_LOCK = threading.Lock()
@@ -285,7 +295,14 @@ class Store:
         except FileNotFoundError:
             pass
 
-    def store_from_origin(self, url: str, progress=None, cancel=None, headers=None) -> sqlite3.Row:
+    def store_from_origin(
+        self,
+        url: str,
+        progress=None,
+        cancel=None,
+        headers=None,
+        max_resume_attempts: int = RESUME_MAX_ATTEMPTS,
+    ) -> sqlite3.Row:
         """Operator-triggered: pull the artifact from origin and store it.
 
         ``progress(done, total)`` is called as bytes arrive (total may be None);
@@ -294,52 +311,105 @@ class Store:
         ``headers`` adds request headers to the origin fetch (e.g. a registry
         bearer token bty pre-resolved for an oras blob). Raises :class:`CacheFull`
         if the cache is already at --max-bytes.
+
+        Resume-on-truncation: if the upstream stream ends before its
+        declared Content-Length, the partial bytes are kept and the
+        next attempt requests ``Range: bytes=<got>-`` so the fetch
+        picks up where the connection died. Up to
+        ``max_resume_attempts`` attempts are made before
+        :class:`TruncatedDownload` is raised; on giving up the
+        partial file is removed. A 200 response to a Range request
+        (the origin chose to ignore the header, common on naive
+        upstreams) is handled by restarting from byte 0 and counts
+        against the same attempt budget. Re-issuing the request also
+        re-resolves any 30x redirect chain, which matters for
+        ghcr.io: each ghcr request hands back a fresh Azure Blob
+        Storage SAS URL valid only for a short window, and the
+        prior cut almost certainly was that SAS expiring mid-stream.
         """
         if not self.has_capacity():
             raise CacheFull(f"cache full (>= {self.max_bytes} bytes); refusing to fetch {url}")
         normalized = self.normalize(url)
         key = self.key_of(normalized)
         tmp = os.path.join(self.tmp_dir, key + ".part")
-        req_headers = {"User-Agent": USER_AGENT}
+        base_headers = {"User-Agent": USER_AGENT}
         if headers:
-            req_headers.update(headers)
-        req = urllib.request.Request(url, headers=req_headers)
+            base_headers.update(headers)
         sha = hashlib.sha256()
         size = 0
+        total: int | None = None
+        content_type: str | None = None
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                content_type = resp.headers.get_content_type()
-                cl = resp.headers.get("Content-Length")
-                total = int(cl) if cl and cl.isdigit() else None
-                if progress:
-                    progress(0, total)
-                with open(tmp, "wb") as f:
-                    while True:
-                        if cancel and cancel():
-                            raise DownloadCancelled()
-                        chunk = resp.read(CHUNK)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        sha.update(chunk)
-                        size += len(chunk)
-                        if progress:
-                            progress(size, total)
-            # urllib's read loop exits on clean EOF AND on transport-
-            # aborted close; HTTPResponse only raises IncompleteRead
-            # in some configurations. When the origin declared
-            # Content-Length, treat that as the contract and refuse
-            # to promote a short blob. A silent partial-promotion
-            # would serve malformed bytes to every future consumer
-            # with no way for them to invalidate the entry.
-            if total is not None and size != total:
+            for _ in range(max_resume_attempts):
+                req_headers = dict(base_headers)
+                if size > 0:
+                    # Resume from where the previous attempt cut.
+                    # A 206 response continues the stream; a 200
+                    # means the origin ignored Range (e.g. a dumb
+                    # static server) and we restart from 0.
+                    req_headers["Range"] = f"bytes={size}-"
+                req = urllib.request.Request(url, headers=req_headers)
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    status = getattr(resp, "status", None) or resp.getcode()
+                    if content_type is None:
+                        content_type = resp.headers.get_content_type()
+                    if size > 0 and status == 200:
+                        # Range ignored by origin: discard the partial
+                        # and start a fresh full-stream attempt.
+                        size = 0
+                        sha = hashlib.sha256()
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                    if size > 0 and status == 206:
+                        # ``Content-Range: bytes <start>-<end>/<total>``;
+                        # use the total declared there as the contract,
+                        # not Content-Length (which on 206 is the size
+                        # of the partial response, not the whole blob).
+                        cr = resp.headers.get("Content-Range") or ""
+                        if "/" in cr:
+                            tail = cr.rsplit("/", 1)[1].strip()
+                            if tail.isdigit():
+                                total = int(tail)
+                    else:
+                        cl = resp.headers.get("Content-Length")
+                        if cl and cl.isdigit():
+                            total = int(cl)
+                    if progress:
+                        progress(size, total)
+                    mode = "ab" if size > 0 else "wb"
+                    with open(tmp, mode) as f:
+                        while True:
+                            if cancel and cancel():
+                                raise DownloadCancelled()
+                            chunk = resp.read(CHUNK)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            sha.update(chunk)
+                            size += len(chunk)
+                            if progress:
+                                progress(size, total)
+                # urllib's read loop exits on clean EOF AND on transport-
+                # aborted close; HTTPResponse only raises IncompleteRead
+                # in some configurations. When the origin declared a
+                # total (either via Content-Length on a 200 or via
+                # Content-Range on a 206), treat that as the contract:
+                # try to resume from the cut, give up after the budget
+                # is exhausted. Without a declared total there is no
+                # truncation signal, so a single attempt is the whole
+                # story.
+                if total is None or size >= total:
+                    break
+            else:
+                # for/else: ran out of attempts before reaching total
                 raise TruncatedDownload(
                     f"upstream truncated for {url}: declared {total} bytes, got {size}"
+                    f" after {max_resume_attempts} attempts"
                 )
             os.replace(tmp, self.blob_path(key))
         except BaseException:
             if os.path.exists(tmp):
-                os.remove(tmp)  # no half-written blob on cancel/error
+                os.remove(tmp)  # no half-written blob on cancel/error/give-up
             raise
         ts = now_iso()
         with _DB_WRITE_LOCK, self.conn() as c:
