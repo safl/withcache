@@ -982,7 +982,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 <body><main class="container">
   <nav>
     <ul><li>
-      <strong>withcache</strong> &nbsp;<small>cache-host</small>
+      <strong>withcache</strong>
       &nbsp;<small class="mono">v{html.escape(__version__)}</small>
     </li></ul>
     <ul>
@@ -996,7 +996,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         hx-indicator="#spin" hx-on::after-request="this.reset()">
     <fieldset role="group">
       <input type="url" name="url" placeholder="https://origin/path/artifact.tar.gz" required>
-      <button type="submit">Fetch &amp; store</button>
+      <!-- white-space: nowrap so the label "Fetch & store" stays on
+           one line; default flex-grow inside fieldset[role=group]
+           shrinks the button to content width, which on a narrow
+           viewport wrapped the ampersand to a second line. -->
+      <button type="submit" style="white-space: nowrap;">Fetch &amp; store</button>
     </fieldset>
   </form>
 
@@ -1136,10 +1140,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             or '<tr><td colspan="4"><em>No misses recorded.</em></td></tr>'
         )
 
+        # Build the per-row /b/ serve URL once; the cell wraps the
+        # origin string in a link that GETs the cached bytes when
+        # the operator clicks. Same path-encoded form the shim
+        # generates so curl / wget / a browser save all end up
+        # writing the correct output filename.
+        def _serve_url_for(row: sqlite3.Row) -> str:
+            origin = row["url"]
+            token = base64.urlsafe_b64encode(origin.encode("utf-8")).decode("ascii").rstrip("=")
+            # last path segment of the origin, fallback "download" so a
+            # URL ending in / still serves with a usable filename.
+            name = urllib.parse.urlsplit(origin).path.rsplit("/", 1)[-1] or "download"
+            return f"/b/{token}/{urllib.parse.quote(name)}"
+
         blob_rows = (
             "".join(
                 f"""<tr>
-                <td class="url">{html.escape(b["url"])}</td>
+                <td class="url">
+                  <a href="{_serve_url_for(b)}"
+                     title="Download the cached object">{html.escape(b["url"])}</a>
+                </td>
                 <td>{human_size(b["size"])}</td>
                 <td class="num">{b["hits"]}</td>
                 <td class="num">{b["misses"]}</td>
@@ -1167,11 +1187,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
   <p><small>{nblobs} cached ({used}){full} &middot; {nmisses} pending miss(es)</small></p>
 {tab_style}
   <nav class="tabs"><ul>
+    <li><a href="#tab-cached">Cached ({nblobs})</a></li>
     <li><a href="#tab-streams">Streams ({nstreams})</a></li>
     <li><a href="#tab-downloads">Downloads ({njobs})</a></li>
     <li><a href="#tab-misses">Misses ({nmisses})</a></li>
-    <li><a href="#tab-cached">Cached ({nblobs})</a></li>
   </ul></nav>
+
+  <section id="tab-cached" class="tab">
+    <figure><table class="striped">
+      <thead><tr>
+        <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
+        <th>SHA-256</th><th>Fetched</th><th>Action</th>
+      </tr></thead>
+      <tbody>{blob_rows}</tbody>
+    </table></figure>
+  </section>
 
   <section id="tab-streams" class="tab">
     <figure><table class="striped">
@@ -1202,16 +1232,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         <th>URL</th><th class="num">Misses</th><th>Last seen</th><th>Action</th>
       </tr></thead>
       <tbody>{miss_rows}</tbody>
-    </table></figure>
-  </section>
-
-  <section id="tab-cached" class="tab">
-    <figure><table class="striped">
-      <thead><tr>
-        <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
-        <th>SHA-256</th><th>Fetched</th><th>Action</th>
-      </tr></thead>
-      <tbody>{blob_rows}</tbody>
     </table></figure>
   </section>"""
 
