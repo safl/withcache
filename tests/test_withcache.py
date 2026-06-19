@@ -371,6 +371,113 @@ class TestRangeResumeOnTruncation(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# StreamRegistry: in-flight blob-serve registry powering the operator dash's
+# "Streams" tab. Validates thread-safety + snapshot ordering + lifecycle.
+# --------------------------------------------------------------------------
+class TestStreamRegistry(unittest.TestCase):
+    def test_start_assigns_unique_ids_and_records_metadata(self):
+        reg = server.StreamRegistry()
+        a = reg.start(url="http://o/x", client="10.0.0.1:5000", total=1024)
+        b = reg.start(url="http://o/y", client="10.0.0.2:5000", total=None)
+        self.assertNotEqual(a.id, b.id)
+        self.assertEqual(a.url, "http://o/x")
+        self.assertEqual(a.client, "10.0.0.1:5000")
+        self.assertEqual(a.total, 1024)
+        self.assertIsNone(b.total)
+        # both visible in snapshot, oldest-first
+        snap = reg.snapshot()
+        self.assertEqual([s.id for s in snap], [a.id, b.id])
+
+    def test_bump_updates_bytes_sent_for_known_id(self):
+        reg = server.StreamRegistry()
+        s = reg.start(url="http://o/x", client="c", total=100)
+        reg.bump(s.id, 42)
+        self.assertEqual(reg.snapshot()[0].bytes_sent, 42)
+        # later bump moves forward; the registry doesn't enforce
+        # monotonicity (the handler is the only caller and it is monotonic)
+        reg.bump(s.id, 99)
+        self.assertEqual(reg.snapshot()[0].bytes_sent, 99)
+
+    def test_bump_unknown_id_is_a_silent_noop(self):
+        """A finish() that races against a final bump() must not crash:
+        the bump arrives, finds the id gone, returns silently. The
+        handler relies on this so its tight write loop doesn't have to
+        special-case the race."""
+        reg = server.StreamRegistry()
+        reg.bump(99999, 7)
+        self.assertEqual(reg.snapshot(), [])
+
+    def test_finish_removes_from_snapshot(self):
+        reg = server.StreamRegistry()
+        s = reg.start(url="http://o/x", client="c", total=10)
+        self.assertEqual(len(reg.snapshot()), 1)
+        reg.finish(s.id)
+        self.assertEqual(reg.snapshot(), [])
+        # second finish is a no-op (handler's finally: block can fire twice)
+        reg.finish(s.id)
+        self.assertEqual(reg.snapshot(), [])
+
+    def test_snapshot_returns_a_copy_not_the_live_dict(self):
+        """Operator code iterating a snapshot must not see torn state when
+        a worker thread starts/finishes a stream mid-iteration."""
+        reg = server.StreamRegistry()
+        s = reg.start(url="http://o/x", client="c", total=10)
+        snap = reg.snapshot()
+        reg.finish(s.id)
+        reg.start(url="http://o/y", client="c", total=10)
+        # snapshot taken before the mutations stays put
+        self.assertEqual(len(snap), 1)
+        self.assertEqual(snap[0].url, "http://o/x")
+
+    def test_concurrent_start_finish_under_load(self):
+        """Hammer the lock with 500 starts + 500 finishes from 10 threads;
+        the registry must end empty with no exception leaks."""
+        reg = server.StreamRegistry()
+        errors: list[BaseException] = []
+
+        def churn():
+            try:
+                for _ in range(50):
+                    s = reg.start(url="http://o/x", client="c", total=10)
+                    reg.bump(s.id, 5)
+                    reg.finish(s.id)
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=churn) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(reg.snapshot(), [])
+
+
+class TestAgeHuman(unittest.TestCase):
+    """``_age_human`` renders elapsed seconds into the compact form the
+    Streams table cell shows. Inject ``now`` so the test doesn't have
+    to monkeypatch ``time.time``."""
+
+    def test_seconds_only(self):
+        self.assertEqual(server._age_human(100.0, now=100.0), "0s")
+        self.assertEqual(server._age_human(100.0, now=159.0), "59s")
+
+    def test_minutes_pad_seconds(self):
+        self.assertEqual(server._age_human(100.0, now=160.0), "1m00s")
+        self.assertEqual(server._age_human(100.0, now=222.0), "2m02s")
+
+    def test_hours_pad_minutes(self):
+        self.assertEqual(server._age_human(0.0, now=3600.0), "1h00m")
+        self.assertEqual(server._age_human(0.0, now=3661.0), "1h01m")
+        self.assertEqual(server._age_human(0.0, now=7320.0), "2h02m")
+
+    def test_negative_clamps_to_zero(self):
+        # Started-at in the future (clock skew, replayed snapshot) renders
+        # as 0s rather than a confusing negative.
+        self.assertEqual(server._age_human(200.0, now=100.0), "0s")
+
+
+# --------------------------------------------------------------------------
 # _shim: URL detection, rewrite, real-tool resolution, env, path-encoding
 # --------------------------------------------------------------------------
 class TestShim(unittest.TestCase):
@@ -536,6 +643,7 @@ def _start_withcache(auto_fetch=False):
     httpd.auth = server.Auth(b"k", None)  # auth disabled -> read path open
     httpd.mgr = server.DownloadManager(store, workers=1)
     httpd.auto_fetch = auto_fetch
+    httpd.streams = server.StreamRegistry()
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, store
 
