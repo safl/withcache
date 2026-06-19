@@ -64,6 +64,18 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _age_human(started_at: float, *, now: float | None = None) -> str:
+    """Render seconds-since as a compact ``Ns`` / ``Nm`` / ``Nh`` string for
+    the streams table. ``now`` is injectable so tests don't need
+    monkeypatching ``time.time`` to assert formatting."""
+    elapsed = int(max(0.0, (now if now is not None else time.time()) - started_at))
+    if elapsed < 60:
+        return f"{elapsed}s"
+    if elapsed < 3600:
+        return f"{elapsed // 60}m{elapsed % 60:02d}s"
+    return f"{elapsed // 3600}h{(elapsed % 3600) // 60:02d}m"
+
+
 def human_size(n: int) -> str:
     f = float(n)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -461,6 +473,65 @@ class TruncatedDownload(Exception):
 
 
 @dataclass
+class Stream:
+    """One in-flight blob serve. Lives in memory only for the duration of
+    the response: registered before the first byte goes out, deregistered
+    in a finally block. Operator visibility into "what is the cache
+    currently uploading, and to whom" without touching the kernel's
+    /proc/net/tcp or the access log.
+    """
+
+    id: int
+    url: str
+    client: str  # ``ip:port`` of the consumer
+    started_at: float
+    bytes_sent: int = 0
+    total: int | None = None  # known up front from the blob row
+
+
+class StreamRegistry:
+    """Thread-safe registry of in-flight blob serves. Reads (snapshot for
+    the operator dash) and writes (start / progress / finish from
+    request handler threads) all serialised on a single lock; the
+    contention window is the few microseconds of a dict mutation, and
+    progress updates are batched at one per chunk (see PROGRESS_STRIDE)
+    so a 4 GiB stream is ~64k updates, not millions.
+    """
+
+    PROGRESS_STRIDE = 16  # update bytes_sent every N chunks (~1 MiB at CHUNK=64K)
+
+    def __init__(self) -> None:
+        self._ids = itertools.count(1)
+        self._lock = threading.Lock()
+        self._active: dict[int, Stream] = {}
+
+    def start(self, url: str, client: str, total: int | None) -> Stream:
+        with self._lock:
+            s = Stream(
+                id=next(self._ids), url=url, client=client, started_at=time.time(), total=total
+            )
+            self._active[s.id] = s
+            return s
+
+    def bump(self, stream_id: int, bytes_sent: int) -> None:
+        # Caller already gates by PROGRESS_STRIDE so this is cheap; the
+        # write itself only takes the lock long enough to mutate the int.
+        with self._lock:
+            s = self._active.get(stream_id)
+            if s is not None:
+                s.bytes_sent = bytes_sent
+
+    def finish(self, stream_id: int) -> None:
+        with self._lock:
+            self._active.pop(stream_id, None)
+
+    def snapshot(self) -> list[Stream]:
+        with self._lock:
+            # Stable order: oldest first (matches the queue mental model).
+            return sorted(self._active.values(), key=lambda s: s.started_at)
+
+
+@dataclass
 class Job:
     id: int
     url: str
@@ -586,6 +657,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     @property
     def auto_fetch(self) -> bool:
         return self.server.auto_fetch  # type: ignore[attr-defined]
+
+    @property
+    def streams(self) -> StreamRegistry:
+        return self.server.streams  # type: ignore[attr-defined]
 
     def log_message(self, format, *args):  # quieter, single-line
         print(f"{self.address_string()} - {format % args}", flush=True)
@@ -779,17 +854,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Withcache-Sha256", row["sha256"])
         self.end_headers()
         if head_only:
-            return  # the shim's HEAD probe — not a served download, so don't count it
+            return  # the shim's HEAD probe (not a served download, so don't count it)
         self.store.record_hit(row["key"])
+        # Register the stream BEFORE we open the file so an operator
+        # watching the dash sees the serve immediately (even if the
+        # disk read stalls). The handler runs on a worker thread per
+        # the ThreadingHTTPServer mixin, so the registry sees
+        # concurrent calls; StreamRegistry serialises on its own lock.
+        client = f"{self.client_address[0]}:{self.client_address[1]}"
+        stream = self.streams.start(url=url, client=client, total=row["size"])
         try:
             with open(path, "rb") as f:
+                sent = 0
+                ticks = 0
                 while True:
                     chunk = f.read(CHUNK)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
+                    sent += len(chunk)
+                    ticks += 1
+                    # Batched progress update: every 16 chunks (~1 MiB
+                    # at CHUNK=64K) is plenty for a 1 Hz dashboard and
+                    # keeps lock-contention sane on a busy box.
+                    if ticks % StreamRegistry.PROGRESS_STRIDE == 0:
+                        self.streams.bump(stream.id, sent)
+                # Final position so the dash's last frame shows the
+                # serve completing at the declared total, not at
+                # whatever the last batched update happened to be.
+                self.streams.bump(stream.id, sent)
         except (BrokenPipeError, ConnectionResetError):
             pass  # client went away mid-stream
+        finally:
+            self.streams.finish(stream.id)
 
     # -- helpers -----------------------------------------------------------
     def read_form(self) -> dict:
@@ -903,7 +1000,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     </fieldset>
   </form>
 
-  <div id="dash" hx-get="/admin/dash" hx-trigger="load, every 1s" hx-swap="innerHTML">
+  <!-- The hx-trigger gates polling on the user NOT having an active
+       text selection, so highlight-and-copy a URL out of a table cell
+       isn't wiped by the 1 Hz refresh. ``isCollapsed`` is true when
+       there's no selection or the caret is a zero-width point; once
+       the operator releases / clears the selection polling resumes
+       on the next 1 s tick. -->
+  <div id="dash" hx-get="/admin/dash"
+       hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
+       hx-swap="innerHTML">
     {self.render_dash()}
   </div>
 </main></body></html>"""
@@ -913,10 +1018,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
         jobs = self.mgr.list()
         misses = self.store.list_misses()
         blobs = self.store.list_blobs()
+        streams = self.streams.snapshot()
         used = human_size(self.store.total_size())
         if self.store.max_bytes:
             used += f" / {human_size(self.store.max_bytes)}"
         full = "" if self.store.has_capacity() else " &middot; <strong>cache full</strong>"
+
+        # Tabs are pure-CSS via :target. The URL hash names the active
+        # section; htmx innerHTML-replacement of #dash leaves the hash
+        # alone, so the operator's tab choice survives every refresh.
+        # ``body:not(:has(section:target))`` selects the default tab
+        # when no hash is present; :has() lands cleanly on Chrome 105+,
+        # Firefox 121+, Safari 15.4+, which is the whole modern web by
+        # the time this ships in 2026.
+        tab_style = """
+<style>
+  nav.tabs { margin: 1rem 0 .25rem; border-bottom: 1px solid var(--pico-muted-border-color); }
+  nav.tabs ul { display: flex; gap: 0; padding: 0; margin: 0; list-style: none; }
+  nav.tabs li { margin: 0; }
+  nav.tabs a {
+    display: inline-block; padding: .45rem .9rem; text-decoration: none;
+    color: var(--pico-muted-color); border-bottom: 2px solid transparent;
+    margin-bottom: -1px; font-size: .9rem;
+  }
+  nav.tabs a:hover { color: var(--pico-color); }
+  section.tab { display: none; padding-top: .75rem; }
+  section.tab:target { display: block; }
+  body:not(:has(section.tab:target)) section.tab#tab-streams { display: block; }
+  body:has(#tab-streams:target)  nav.tabs a[href="#tab-streams"],
+  body:has(#tab-downloads:target) nav.tabs a[href="#tab-downloads"],
+  body:has(#tab-misses:target)    nav.tabs a[href="#tab-misses"],
+  body:has(#tab-cached:target)    nav.tabs a[href="#tab-cached"] {
+    color: var(--pico-color);
+    border-bottom-color: var(--pico-primary, #0172ad);
+    font-weight: 600;
+  }
+  body:not(:has(section.tab:target)) nav.tabs a[href="#tab-streams"] {
+    color: var(--pico-color);
+    border-bottom-color: var(--pico-primary, #0172ad);
+    font-weight: 600;
+  }
+</style>
+"""
+
+        stream_rows = (
+            "".join(
+                f"""<tr>
+                <td class="url">{html.escape(s.url)}</td>
+                <td class="mono"><small>{html.escape(s.client)}</small></td>
+                <td>{self._stream_progress_cell(s)}</td>
+                <td><small>{_age_human(s.started_at)}</small></td>
+            </tr>"""
+                for s in streams
+            )
+            or '<tr><td colspan="4"><em>No active streams.</em></td></tr>'
+        )
 
         job_rows = (
             "".join(self._job_row(j) for j in jobs)
@@ -968,35 +1124,76 @@ class Handler(http.server.BaseHTTPRequestHandler):
             or '<tr><td colspan="7"><em>Cache is empty.</em></td></tr>'
         )
 
+        # Per-tab counts let the operator see at a glance whether each
+        # section is empty without flipping to it.
+        nstreams = len(streams)
+        njobs = len(jobs)
+
         return f"""
   <p><small>{nblobs} cached ({used}){full} &middot; {nmisses} pending miss(es)</small></p>
+{tab_style}
+  <nav class="tabs"><ul>
+    <li><a href="#tab-streams">Streams ({nstreams})</a></li>
+    <li><a href="#tab-downloads">Downloads ({njobs})</a></li>
+    <li><a href="#tab-misses">Misses ({nmisses})</a></li>
+    <li><a href="#tab-cached">Cached ({nblobs})</a></li>
+  </ul></nav>
 
-  <div class="row">
-    <h4>Downloads</h4>
-    <form hx-post="/admin/clear" hx-target="#dash" hx-swap="innerHTML" style="margin:0">
-      <button type="submit" class="secondary outline" style="width:auto;padding:.2rem .7rem">
-        Clear finished</button>
-    </form>
-  </div>
-  <figure><table class="striped">
-    <thead><tr><th>Artifact</th><th>Progress</th><th>Status</th><th></th></tr></thead>
-    <tbody>{job_rows}</tbody>
-  </table></figure>
+  <section id="tab-streams" class="tab">
+    <figure><table class="striped">
+      <thead><tr>
+        <th>URL</th><th>Client</th><th>Progress</th><th>Age</th>
+      </tr></thead>
+      <tbody>{stream_rows}</tbody>
+    </table></figure>
+  </section>
 
-  <h4>Misses</h4>
-  <figure><table class="striped">
-    <thead><tr><th>URL</th><th class="num">Misses</th><th>Last seen</th><th>Action</th></tr></thead>
-    <tbody>{miss_rows}</tbody>
-  </table></figure>
+  <section id="tab-downloads" class="tab">
+    <div class="row">
+      <small>Auto-fetch workers feeding the cache.</small>
+      <form hx-post="/admin/clear" hx-target="#dash" hx-swap="innerHTML" style="margin:0">
+        <button type="submit" class="secondary outline" style="width:auto;padding:.2rem .7rem">
+          Clear finished</button>
+      </form>
+    </div>
+    <figure><table class="striped">
+      <thead><tr><th>Artifact</th><th>Progress</th><th>Status</th><th></th></tr></thead>
+      <tbody>{job_rows}</tbody>
+    </table></figure>
+  </section>
 
-  <h4>Cached artifacts</h4>
-  <figure><table class="striped">
-    <thead><tr>
-      <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
-      <th>SHA-256</th><th>Fetched</th><th>Action</th>
-    </tr></thead>
-    <tbody>{blob_rows}</tbody>
-  </table></figure>"""
+  <section id="tab-misses" class="tab">
+    <figure><table class="striped">
+      <thead><tr>
+        <th>URL</th><th class="num">Misses</th><th>Last seen</th><th>Action</th>
+      </tr></thead>
+      <tbody>{miss_rows}</tbody>
+    </table></figure>
+  </section>
+
+  <section id="tab-cached" class="tab">
+    <figure><table class="striped">
+      <thead><tr>
+        <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
+        <th>SHA-256</th><th>Fetched</th><th>Action</th>
+      </tr></thead>
+      <tbody>{blob_rows}</tbody>
+    </table></figure>
+  </section>"""
+
+    def _stream_progress_cell(self, s: Stream) -> str:
+        """One progress cell for an active stream: a <progress> bar when the
+        total is known (always for a cached blob, since the size came off
+        the row), with a small ``sent / total`` line under it. Falls back
+        to bytes-only when total somehow went missing."""
+        if s.total is None or s.total <= 0:
+            return f'<small class="mono">{human_size(s.bytes_sent)}</small>'
+        pct = min(100, int(s.bytes_sent * 100 / s.total))
+        return (
+            f'<progress value="{s.bytes_sent}" max="{s.total}"></progress>'
+            f'<br><small class="mono">{human_size(s.bytes_sent)} / '
+            f"{human_size(s.total)} ({pct}%)</small>"
+        )
 
     def _job_row(self, j: Job) -> str:
         name = os.path.basename(urllib.parse.urlsplit(j.url).path) or j.url
@@ -1074,6 +1271,7 @@ def main():
     httpd.auth = auth  # type: ignore[attr-defined]
     httpd.mgr = mgr  # type: ignore[attr-defined]
     httpd.auto_fetch = not args.curate  # type: ignore[attr-defined]
+    httpd.streams = StreamRegistry()  # type: ignore[attr-defined]
     print(
         f"withcache cache-host on http://{args.host}:{args.port}  "
         f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "

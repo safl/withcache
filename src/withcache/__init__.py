@@ -12,6 +12,6 @@ All modules are stdlib-only and self-contained.
 
 from .client import blob_url, cache_base, is_cached, serve_url
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 __all__ = ["__version__", "blob_url", "cache_base", "is_cached", "serve_url"]
