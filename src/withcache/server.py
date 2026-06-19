@@ -1011,6 +1011,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
        hx-swap="innerHTML">
     {self.render_dash()}
   </div>
+
+  <!-- Tab activation. Applies an ``active-tab`` class to the
+       ``section.tab`` whose id matches the URL hash (defaulting to
+       the first section when no hash is set) and to the
+       corresponding ``nav.tabs a``. Runs on initial load, on every
+       click into a tab link (so the operator gets immediate
+       feedback before the next htmx tick), and on every
+       ``htmx:afterSettle`` so the class survives the 1 Hz
+       innerHTML replacement of ``#dash``. Without this the
+       previous ``:target``-based CSS would snap the operator back
+       to the first tab within a second of any click. -->
+  <script>
+    (function () {{
+      function applyActiveTab() {{
+        var hash = (window.location.hash || '').replace(/^#/, '');
+        var sections = document.querySelectorAll('#dash section.tab');
+        if (!sections.length) return;
+        var ids = Array.prototype.map.call(sections, function (s) {{ return s.id; }});
+        if (ids.indexOf(hash) === -1) hash = ids[0];
+        sections.forEach(function (s) {{
+          s.classList.toggle('active-tab', s.id === hash);
+        }});
+        document.querySelectorAll('#dash nav.tabs a').forEach(function (a) {{
+          var target = (a.getAttribute('href') || '').replace(/^#/, '');
+          a.classList.toggle('active-tab', target === hash);
+        }});
+      }}
+      window.addEventListener('hashchange', applyActiveTab);
+      document.body.addEventListener('htmx:afterSettle', applyActiveTab);
+      document.addEventListener('click', function (ev) {{
+        var a = ev.target.closest && ev.target.closest('#dash nav.tabs a');
+        if (a) setTimeout(applyActiveTab, 0);
+      }});
+      applyActiveTab();
+    }})();
+  </script>
 </main></body></html>"""
 
     def render_dash(self) -> str:
@@ -1024,13 +1060,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             used += f" / {human_size(self.store.max_bytes)}"
         full = "" if self.store.has_capacity() else " &middot; <strong>cache full</strong>"
 
-        # Tabs are pure-CSS via :target. The URL hash names the active
-        # section; htmx innerHTML-replacement of #dash leaves the hash
-        # alone, so the operator's tab choice survives every refresh.
-        # ``body:not(:has(section:target))`` selects the default tab
-        # when no hash is present; :has() lands cleanly on Chrome 105+,
-        # Firefox 121+, Safari 15.4+, which is the whole modern web by
-        # the time this ships in 2026.
+        # Tabs are driven by an ``active-tab`` class applied to one
+        # ``section.tab`` (and matching ``nav.tabs a``). A tiny script
+        # at the bottom of the dash watches the URL hash, the htmx
+        # post-swap event, and click events on the tab links so the
+        # class survives every 1 Hz innerHTML replacement.
+        #
+        # An earlier pure-CSS attempt used ``:target`` + ``:has()``.
+        # That works on a static page, but when htmx swaps the
+        # ``#dash`` innerHTML each second the freshly-inserted
+        # ``section.tab`` elements do not always get re-matched by
+        # ``:target`` (the browser keeps the URL hash but the
+        # newly-inserted node is not the one ``:target`` resolved to
+        # at hash-change time). The visible symptom was the tab
+        # snapping back to Streams within a second of every click.
         tab_style = """
 <style>
   nav.tabs { margin: 1rem 0 .25rem; border-bottom: 1px solid var(--pico-muted-border-color); }
@@ -1042,22 +1085,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     margin-bottom: -1px; font-size: .9rem;
   }
   nav.tabs a:hover { color: var(--pico-color); }
+  nav.tabs a.active-tab {
+    color: var(--pico-color);
+    border-bottom-color: var(--pico-primary, #0172ad);
+    font-weight: 600;
+  }
   section.tab { display: none; padding-top: .75rem; }
-  section.tab:target { display: block; }
-  body:not(:has(section.tab:target)) section.tab#tab-streams { display: block; }
-  body:has(#tab-streams:target)  nav.tabs a[href="#tab-streams"],
-  body:has(#tab-downloads:target) nav.tabs a[href="#tab-downloads"],
-  body:has(#tab-misses:target)    nav.tabs a[href="#tab-misses"],
-  body:has(#tab-cached:target)    nav.tabs a[href="#tab-cached"] {
-    color: var(--pico-color);
-    border-bottom-color: var(--pico-primary, #0172ad);
-    font-weight: 600;
-  }
-  body:not(:has(section.tab:target)) nav.tabs a[href="#tab-streams"] {
-    color: var(--pico-color);
-    border-bottom-color: var(--pico-primary, #0172ad);
-    font-weight: 600;
-  }
+  section.tab.active-tab { display: block; }
 </style>
 """
 
