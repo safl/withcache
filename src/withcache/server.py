@@ -41,7 +41,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from . import __version__
+from . import __version__, oras
 
 CHUNK = 64 * 1024
 USER_AGENT = f"withcache-cache/{__version__}"
@@ -316,6 +316,7 @@ class Store:
         cancel=None,
         headers=None,
         max_resume_attempts: int = RESUME_MAX_ATTEMPTS,
+        fetch_resolver=None,
     ) -> sqlite3.Row:
         """Operator-triggered: pull the artifact from origin and store it.
 
@@ -325,6 +326,15 @@ class Store:
         ``headers`` adds request headers to the origin fetch (e.g. a registry
         bearer token bty pre-resolved for an oras blob). Raises :class:`CacheFull`
         if the cache is already at --max-bytes.
+
+        ``fetch_resolver`` is an optional zero-arg callable that returns
+        ``(fetch_url, fetch_headers)`` for the current attempt. When set,
+        every resume attempt re-invokes it -- so an ``oras://...`` cache key
+        can be backed by a fresh registry bearer + fresh signed CDN URL on
+        each retry (both have short TTLs the resume loop will otherwise blow
+        through). When unset, every attempt hits ``url`` directly. The
+        ``fetch_headers`` are layered under the caller-supplied ``headers``,
+        so an operator-provided override wins.
 
         Resume-on-truncation: if the upstream stream ends before its
         declared Content-Length, the partial bytes are kept and the
@@ -346,23 +356,32 @@ class Store:
         normalized = self.normalize(url)
         key = self.key_of(normalized)
         tmp = os.path.join(self.tmp_dir, key + ".part")
-        base_headers = {"User-Agent": USER_AGENT}
-        if headers:
-            base_headers.update(headers)
         sha = hashlib.sha256()
         size = 0
         total: int | None = None
         content_type: str | None = None
         try:
             for _ in range(max_resume_attempts):
-                req_headers = dict(base_headers)
+                # Resolve fetch URL + headers afresh per attempt: for
+                # oras://, the bearer + signed CDN URL each have short
+                # TTLs the prior attempt may have blown through; for
+                # plain HTTP the resolver is unset and we fetch ``url``
+                # with a stable header set.
+                if fetch_resolver is not None:
+                    fetch_url, resolved_headers = fetch_resolver()
+                else:
+                    fetch_url = url
+                    resolved_headers = {}
+                req_headers = {"User-Agent": USER_AGENT, **resolved_headers}
+                if headers:
+                    req_headers.update(headers)
                 if size > 0:
                     # Resume from where the previous attempt cut.
                     # A 206 response continues the stream; a 200
                     # means the origin ignored Range (e.g. a dumb
                     # static server) and we restart from 0.
                     req_headers["Range"] = f"bytes={size}-"
-                req = urllib.request.Request(url, headers=req_headers)
+                req = urllib.request.Request(fetch_url, headers=req_headers)
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     status = getattr(resp, "status", None) or resp.getcode()
                     if content_type is None:
@@ -605,11 +624,26 @@ class DownloadManager:
                 job.status = "running"
                 job.started_at = time.time()
             try:
+                # For oras://, the cache key stays the original ref but
+                # the actual request goes through a freshly-minted
+                # bearer + resolved blob URL. The resolver runs per
+                # resume attempt so a long fetch survives bearer /
+                # signed-URL TTL expiry mid-stream (the same kind of
+                # cut the surrounding Range-resume loop was built for).
+                fetch_resolver: object = None
+                if oras.is_oras_url(job.url):
+
+                    def _oras_resolve(_url: str = job.url) -> tuple[str, dict[str, str]]:
+                        resolved = oras.resolve_ref(_url)
+                        return resolved.blob_url, dict(resolved.headers)
+
+                    fetch_resolver = _oras_resolve
                 row = self.store.store_from_origin(
                     job.url,
                     progress=lambda done, total, j=job: _set_progress(j, done, total),
                     cancel=job._cancel.is_set,
                     headers=job.headers,
+                    fetch_resolver=fetch_resolver,
                 )
                 with self._lock:
                     job.status = "completed"
