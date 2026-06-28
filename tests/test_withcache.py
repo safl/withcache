@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -959,6 +960,67 @@ class TestClientLibraryAuthForwarding(unittest.TestCase):
             client.serve_url(self.base, self.origin_url),
             client.blob_url(self.base, self.origin_url),
         )
+
+
+class TestOrasTagRevalidation(unittest.TestCase):
+    """server._oras_tag_moved: the store keys on the ref string, so a
+    re-pushed *mutable* tag must be detected and invalidated, while
+    digest-pinned refs and unreachable registries leave the cache intact."""
+
+    TAG = "oras://ghcr.io/safl/nosi/ubuntu-2604-headless:2026.W26"
+    HEX_A = "a" * 64
+    HEX_B = "b" * 64
+
+    @staticmethod
+    def _resolver(digest_hex):
+        def _r(_ref):
+            return types.SimpleNamespace(digest="sha256:" + digest_hex)
+
+        return _r
+
+    def test_moved_when_registry_digest_differs(self):
+        self.assertTrue(
+            server._oras_tag_moved(self.TAG, self.HEX_A, resolve=self._resolver(self.HEX_B))
+        )
+
+    def test_not_moved_when_digest_matches(self):
+        self.assertFalse(
+            server._oras_tag_moved(self.TAG, self.HEX_A, resolve=self._resolver(self.HEX_A))
+        )
+
+    def test_digest_match_is_case_insensitive(self):
+        self.assertFalse(
+            server._oras_tag_moved(self.TAG, self.HEX_A.upper(), resolve=self._resolver(self.HEX_A))
+        )
+
+    def test_digest_pinned_ref_never_revalidates(self):
+        pinned = "oras://ghcr.io/safl/nosi/x@sha256:" + self.HEX_A
+        calls = []
+
+        def _r(ref):
+            calls.append(ref)
+            return types.SimpleNamespace(digest="sha256:" + self.HEX_B)
+
+        self.assertFalse(server._oras_tag_moved(pinned, self.HEX_A, resolve=_r))
+        self.assertEqual(calls, [], "a digest-pinned ref must not hit the registry")
+
+    def test_non_oras_url_is_never_moved(self):
+        self.assertFalse(
+            server._oras_tag_moved(
+                "https://h/x.img.gz", self.HEX_A, resolve=self._resolver(self.HEX_B)
+            )
+        )
+
+    def test_missing_cached_sha_keeps_entry(self):
+        r = self._resolver(self.HEX_B)
+        self.assertFalse(server._oras_tag_moved(self.TAG, "", resolve=r))
+        self.assertFalse(server._oras_tag_moved(self.TAG, None, resolve=r))
+
+    def test_resolve_error_serves_cached(self):
+        def _boom(_ref):
+            raise OSError("registry unreachable")
+
+        self.assertFalse(server._oras_tag_moved(self.TAG, self.HEX_A, resolve=_boom))
 
 
 if __name__ == "__main__":

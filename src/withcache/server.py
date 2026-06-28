@@ -669,6 +669,49 @@ def _set_progress(job: Job, done: int, total: int | None):
         job.bytes_total = total
 
 
+def _oras_tag_moved(url: str, cached_sha: str | None, *, resolve=oras.resolve_ref) -> bool:
+    """True iff ``url`` is an ``oras://`` *tag* whose layer the registry now
+    resolves to something other than ``cached_sha``.
+
+    The store keys on the ref string, not the resolved digest, so a mutable
+    tag that is re-pushed (e.g. a rolling weekly image tag) would otherwise
+    serve the first-cached bytes forever. Re-resolve the tag and compare its
+    current layer digest against the cached bytes' ``sha256`` -- which IS that
+    layer's content digest, so the comparison is exact.
+
+    Returns False (keep the cached copy) for anything we cannot prove has
+    moved: a non-oras URL, a digest-pinned ref (content-addressed, immutable),
+    a missing ``cached_sha``, or a registry/resolve error -- availability
+    beats freshness when the origin is unreachable, and a transient failure
+    must never nuke a good entry. Returns True only on a demonstrated move, so
+    the caller invalidates and re-fetches. ``resolve`` is injectable for tests.
+    """
+    if not oras.is_oras_url(url):
+        return False
+    try:
+        ref = oras.parse_ref(url)
+    except Exception:
+        return False
+    if ref.digest is not None:
+        return False  # digest-pinned: the ref already names the content
+    cached = (cached_sha or "").lower()
+    if not cached:
+        return False
+    try:
+        current = resolve(ref).digest.split(":", 1)[-1].lower()
+    except Exception as exc:
+        print(f"withcache: oras revalidate {url} failed: {exc}; serving cached copy", flush=True)
+        return False
+    if current == cached:
+        return False
+    print(
+        f"withcache: oras tag moved {url}: "
+        f"cached sha256:{cached[:12]} -> registry sha256:{current[:12]}; invalidating",
+        flush=True,
+    )
+    return True
+
+
 # --------------------------------------------------------------------------
 # HTTP handler
 # --------------------------------------------------------------------------
@@ -856,6 +899,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_text(400, "missing url\n")
             return
         row = self.store.get_blob(url)
+        if row is not None and _oras_tag_moved(url, row["sha256"]):
+            # The tag was re-pushed to a different layer since we cached it.
+            # Drop the stale bytes and fall through to the miss path so the
+            # current content is (auto-)fetched. Deleting first also frees the
+            # space the refill needs when the store is near --max-bytes.
+            self.store.delete_blob(row["key"])
+            row = None
         if row is None:
             self.store.record_miss(url)
             if self.auto_fetch and self.store.has_capacity():
