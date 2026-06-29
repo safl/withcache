@@ -40,6 +40,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import ClassVar
 
 from . import __version__, oras
 
@@ -471,7 +472,6 @@ class Store:
 # --------------------------------------------------------------------------
 # Background download manager (thread pool; modelled on bty's job managers)
 # --------------------------------------------------------------------------
-JOB_STATES = ("queued", "running", "completed", "cancelled", "failed")
 PENDING_STATES = frozenset(("queued", "running"))
 
 
@@ -1012,7 +1012,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     # -- HTML --------------------------------------------------------------
-    STATUS_COLORS = {
+    STATUS_COLORS: ClassVar[dict[str, str]] = {
         "queued": "#888",
         "running": "var(--pico-primary, #0172ad)",
         "completed": "#2e7d32",
