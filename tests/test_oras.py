@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from withcache import oras, server  # noqa: E402
+from withcache import oras, server
 
 # A trimmed-down version of a real nosi manifest -- two layers (the
 # .img.gz and a .sha256 sidecar), one annotation each, OCI media types.
@@ -304,9 +304,11 @@ class TestResolveRef(unittest.TestCase):
         def _failing(req, timeout=None):
             raise OSError("network unreachable")
 
-        with patch("urllib.request.urlopen", _failing):
-            with self.assertRaisesRegex(oras.OrasError, "token fetch failed"):
-                oras.resolve_ref("oras://ghcr.io/safl/nosi/debian-sysdev:latest")
+        with (
+            patch("urllib.request.urlopen", _failing),
+            self.assertRaisesRegex(oras.OrasError, "token fetch failed"),
+        ):
+            oras.resolve_ref("oras://ghcr.io/safl/nosi/debian-sysdev:latest")
 
 
 class TestIsOrasUrl(unittest.TestCase):
@@ -341,9 +343,11 @@ class TestUrlopenRetry(unittest.TestCase):
                 calls["n"] += 1
                 raise _http_error(404)
 
-            with patch("urllib.request.urlopen", _notfound):
-                with self.assertRaises(urllib.error.HTTPError):
-                    oras._urlopen_retry("https://x/y", timeout=5)
+            with (
+                patch("urllib.request.urlopen", _notfound),
+                self.assertRaises(urllib.error.HTTPError),
+            ):
+                oras._urlopen_retry("https://x/y", timeout=5)
             self.assertEqual(calls["n"], 1)
 
     def test_exhausts_then_reraises(self):
@@ -354,9 +358,11 @@ class TestUrlopenRetry(unittest.TestCase):
                 calls["n"] += 1
                 raise _http_error(503)
 
-            with patch("urllib.request.urlopen", _down):
-                with self.assertRaises(urllib.error.HTTPError):
-                    oras._urlopen_retry("https://x/y", timeout=5)
+            with (
+                patch("urllib.request.urlopen", _down),
+                self.assertRaises(urllib.error.HTTPError),
+            ):
+                oras._urlopen_retry("https://x/y", timeout=5)
             self.assertEqual(calls["n"], oras._RETRY_ATTEMPTS)
 
 
