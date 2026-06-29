@@ -267,6 +267,20 @@ the probe records the miss and, in auto-fetch mode, enqueues the fill, so the
 next call flips to the cache. The encoding is shared with the shims and server,
 so consumers stay in lockstep with the cache-host.
 
+### Pull an `oras://` artifact (oras + client together)
+
+For a registry blob, pair `withcache.oras` (resolve the reference to a blob URL
++ bearer) with `client.serve_url` (prefer the cache when warm). A runnable
+example is in [`examples/pull_oras_blob.py`](examples/pull_oras_blob.py):
+
+```python
+from withcache import client, oras
+
+resolved = oras.resolve_ref("oras://ghcr.io/<owner>/<repo>@sha256:<digest>")
+url, headers = resolved.blob_url, dict(resolved.headers)
+url = client.serve_url(server, url, headers=headers) or url   # cache when warm
+```
+
 ## Tests
 
 ```sh
