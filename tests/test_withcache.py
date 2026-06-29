@@ -4,7 +4,9 @@ No third-party test deps; src/ is put on the path so the package imports
 without an install.
 """
 
+import contextlib
 import http.server
+import itertools
 import os
 import shutil
 import socket
@@ -18,11 +20,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import base64  # noqa: E402
-import urllib.error  # noqa: E402
-import urllib.request  # noqa: E402
+import base64
+import urllib.error
+import urllib.request
 
-from withcache import _shim, client, curlwithcache, server, wgetwithcache  # noqa: E402
+from withcache import _shim, client, curlwithcache, server, wgetwithcache
 
 
 # --------------------------------------------------------------------------
@@ -187,10 +189,8 @@ class _TruncatingOrigin(http.server.BaseHTTPRequestHandler):
         # close the underlying socket so urllib observes EOF before
         # Content-Length bytes arrive
         self.wfile.flush()
-        try:
+        with contextlib.suppress(OSError):
             self.connection.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
 
     def log_message(self, format, *args):
         pass
@@ -307,10 +307,8 @@ class _ResumableTruncatingOrigin(http.server.BaseHTTPRequestHandler):
             half = full // 2
             self.wfile.write(self.PAYLOAD[:half])
             self.wfile.flush()
-            try:
+            with contextlib.suppress(OSError):
                 self.connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
         else:
             # any non-ranged retry serves the whole thing (covers the
             # 200-on-Range fallback path: origin ignored Range, we
@@ -362,7 +360,7 @@ class TestRangeResumeOnTruncation(unittest.TestCase):
         # final report should be the full payload
         self.assertEqual(observed[-1][0], len(_ResumableTruncatingOrigin.PAYLOAD))
         # at no point did the byte counter regress
-        for prev, curr in zip(observed, observed[1:], strict=False):
+        for prev, curr in itertools.pairwise(observed):
             self.assertGreaterEqual(curr[0], prev[0])
         # the resume actually crossed the cut point: at least one
         # progress call lands above the half-mark (otherwise we
@@ -732,7 +730,7 @@ class TestAutoFetchOnMiss(unittest.TestCase):
             urllib.request.urlopen(_shim.blob_url(base, self.origin_url))
 
     def test_miss_schedules_pull_by_default(self):
-        httpd, store = _start_withcache(auto_fetch=True)
+        httpd, _store = _start_withcache(auto_fetch=True)
         try:
             self._miss(httpd)
             # the miss enqueued a background pull, no operator needed

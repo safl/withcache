@@ -15,7 +15,7 @@ import unittest
 HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
-from withcache import _shim  # noqa: E402
+from withcache import _shim
 
 SHIM = os.environ.get(
     "WITHCACHE_SHIM", os.path.join(HERE, "..", "shim", "zig-out", "bin", "withcache-shim")
