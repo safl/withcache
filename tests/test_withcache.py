@@ -1023,5 +1023,45 @@ class TestOrasTagRevalidation(unittest.TestCase):
         self.assertFalse(server._oras_tag_moved(self.TAG, self.HEX_A, resolve=_boom))
 
 
+class TestDashActiveTabFromHeader(unittest.TestCase):
+    """``GET /admin/dash`` bakes ``.active-tab`` into the rendered HTML
+    based on the ``X-Active-Tab`` request header. The browser sends the
+    current URL hash on every refresh so the htmx innerHTML swap doesn't
+    visibly blink while a post-swap JS would otherwise re-apply the class.
+    """
+
+    def setUp(self):
+        self.httpd, self.store = _start_withcache()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def _dash(self, active_tab=None):
+        req = urllib.request.Request(self.base + "/admin/dash")
+        if active_tab is not None:
+            req.add_header("X-Active-Tab", active_tab)
+        return urllib.request.urlopen(req).read().decode("utf-8")
+
+    def test_default_tab_when_header_missing(self):
+        body = self._dash()
+        # tab-cached is the first tab and the no-header default
+        self.assertIn('<section id="tab-cached" class="tab active-tab">', body)
+        self.assertIn('<section id="tab-streams" class="tab">', body)
+
+    def test_header_picks_the_active_tab(self):
+        body = self._dash("tab-misses")
+        self.assertIn('<section id="tab-misses" class="tab active-tab">', body)
+        self.assertIn('<section id="tab-cached" class="tab">', body)
+
+    def test_unknown_header_value_falls_back_to_first(self):
+        """A hand-crafted X-Active-Tab with a bogus value must not echo
+        into the HTML; the renderer falls back to the first tab."""
+        body = self._dash("tab-totally-not-real")
+        self.assertIn('<section id="tab-cached" class="tab active-tab">', body)
+        self.assertNotIn("tab-totally-not-real", body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
