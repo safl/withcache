@@ -22,6 +22,7 @@ admin password is set, the operator UI is left open (with a startup warning).
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import hmac
 import html
@@ -305,10 +306,8 @@ class Store:
         """Drop a cached artifact (row + bytes). The manual half of eviction."""
         with _DB_WRITE_LOCK, self.conn() as c:
             c.execute("DELETE FROM blobs WHERE key=?", (key,))
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.remove(self.blob_path(key))
-        except FileNotFoundError:
-            pass
 
     def store_from_origin(
         self,
