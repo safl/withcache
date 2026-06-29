@@ -757,7 +757,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not self.is_authed():
                 self.send_text(401, "login required\n")
             else:
-                self.send_html(200, self.render_dash())
+                # The browser sends the current URL hash (the active
+                # tab id) via the ``X-Active-Tab`` request header on
+                # every 1 Hz refresh. Server bakes the matching
+                # ``.active-tab`` class directly into the rendered
+                # HTML so the htmx innerHTML swap doesn't visibly
+                # blink while the post-swap JS would otherwise
+                # re-apply the class. See render_dash().
+                active = (self.headers.get("X-Active-Tab") or "").strip()
+                self.send_html(200, self.render_dash(active_tab=active))
         elif parsed.path == "/":
             if not self.is_authed():
                 self.redirect("/ui/login")
@@ -1093,11 +1101,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
        isn't wiped by the 1 Hz refresh. ``isCollapsed`` is true when
        there's no selection or the caret is a zero-width point; once
        the operator releases / clears the selection polling resumes
-       on the next 1 s tick. -->
+       on the next 1 s tick.
+       ``hx-headers`` sends the current URL hash (the active tab id)
+       as ``X-Active-Tab`` on every refresh so the server can bake
+       ``.active-tab`` into the rendered HTML -- eliminating the
+       visible flicker the post-swap JS-applied class would otherwise
+       cause when the new innerHTML lands without the class. -->
   <div id="dash" hx-get="/admin/dash"
        hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
-       hx-swap="innerHTML">
-    {self.render_dash()}
+       hx-swap="innerHTML"
+       hx-headers='js:{{"X-Active-Tab": (location.hash || "").replace(/^#/, "")}}'>
+    {self.render_dash(active_tab=(self.headers.get("X-Active-Tab") or "").strip())}
   </div>
 
   <!-- Tab activation. Applies an ``active-tab`` class to the
@@ -1137,7 +1151,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
   </script>
 </main></body></html>"""
 
-    def render_dash(self) -> str:
+    def render_dash(self, active_tab: str = "") -> str:
+        # Tab activation is baked into the rendered HTML so the htmx
+        # innerHTML swap doesn't strip `.active-tab` between the
+        # swap and the post-settle JS re-apply. The client sends
+        # the current hash via the ``X-Active-Tab`` header on each
+        # 1 Hz refresh (and on every operator click via the same
+        # script that watches hashchange). Unknown / empty value
+        # defaults to the first tab.
+        _TAB_IDS = ("tab-cached", "tab-streams", "tab-downloads", "tab-misses")
+        if active_tab not in _TAB_IDS:
+            active_tab = _TAB_IDS[0]
+
+        def _active(tab_id: str) -> str:
+            return " active-tab" if tab_id == active_tab else ""
+
         nblobs, nmisses = self.store.counts()
         jobs = self.mgr.list()
         misses = self.store.list_misses()
@@ -1271,13 +1299,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
   <p><small>{nblobs} cached ({used}){full} &middot; {nmisses} pending miss(es)</small></p>
 {tab_style}
   <nav class="tabs"><ul>
-    <li><a href="#tab-cached">Cached ({nblobs})</a></li>
-    <li><a href="#tab-streams">Streams ({nstreams})</a></li>
-    <li><a href="#tab-downloads">Downloads ({njobs})</a></li>
-    <li><a href="#tab-misses">Misses ({nmisses})</a></li>
+    <li><a href="#tab-cached" class="{_active("tab-cached").lstrip()}"
+       >Cached ({nblobs})</a></li>
+    <li><a href="#tab-streams" class="{_active("tab-streams").lstrip()}"
+       >Streams ({nstreams})</a></li>
+    <li><a href="#tab-downloads" class="{_active("tab-downloads").lstrip()}"
+       >Downloads ({njobs})</a></li>
+    <li><a href="#tab-misses" class="{_active("tab-misses").lstrip()}"
+       >Misses ({nmisses})</a></li>
   </ul></nav>
 
-  <section id="tab-cached" class="tab">
+  <section id="tab-cached" class="tab{_active("tab-cached")}">
     <figure><table class="striped">
       <thead><tr>
         <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
@@ -1287,7 +1319,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     </table></figure>
   </section>
 
-  <section id="tab-streams" class="tab">
+  <section id="tab-streams" class="tab{_active("tab-streams")}">
     <figure><table class="striped">
       <thead><tr>
         <th>URL</th><th>Client</th><th>Progress</th><th>Age</th>
@@ -1296,7 +1328,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     </table></figure>
   </section>
 
-  <section id="tab-downloads" class="tab">
+  <section id="tab-downloads" class="tab{_active("tab-downloads")}">
     <div class="row">
       <small>Auto-fetch workers feeding the cache.</small>
       <form hx-post="/admin/clear" hx-target="#dash" hx-swap="innerHTML" style="margin:0">
@@ -1310,7 +1342,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     </table></figure>
   </section>
 
-  <section id="tab-misses" class="tab">
+  <section id="tab-misses" class="tab{_active("tab-misses")}">
     <figure><table class="striped">
       <thead><tr>
         <th>URL</th><th class="num">Misses</th><th>Last seen</th><th>Action</th>
