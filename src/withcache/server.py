@@ -180,12 +180,12 @@ def _serialise_catalog(entries: list[dict[str, Any]]) -> bytes:
 class CatalogState:
     """Live state of the fetched image catalog.
 
-    withcache does not run a background poller. The catalog is
-    fetched at process start (best-effort, persisted result from
-    the last successful fetch survives a restart), refetched
-    lazily when the dashboard renders and the in-memory copy is
-    older than :data:`CATALOG_CACHE_TTL`, and force-refetched by
-    the operator via the Refresh button (POST /admin/catalog_refresh).
+    withcache does not run a background poller and does not refetch
+    on a TTL. The catalog is fetched at process start (best-effort;
+    a persisted result from the last successful fetch survives a
+    restart) and force-refetched by the operator via the Refresh
+    button on the Catalog page (POST /admin/catalog_refresh); every
+    other render reads whatever is currently in memory.
 
     The raw TOML bytes are persisted to ``<data_dir>/catalog.toml``
     so a restart doesn't wipe the last known good catalog and the
