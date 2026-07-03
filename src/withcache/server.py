@@ -1136,6 +1136,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     _PRIMARY_RGB = "143, 27, 113"
 
     def _head(self, title: str) -> str:
+        """Emit the shared page prelude: Bootstrap + icons + htmx +
+        the full bty-family chrome CSS. Every service (bty, withcache,
+        nbdmux) uses this same block; the only per-service knob is the
+        primary hue (``--bs-primary`` and the derived button /
+        rgba() variants). See bty's ``_layout.html`` for the origin
+        of these class names -- kept identical here so operators
+        moving between consoles see one visual grammar."""
         primary = self._PRIMARY_HEX
         hover = self._PRIMARY_HOVER
         rgb = self._PRIMARY_RGB
@@ -1147,9 +1154,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
 <script src="/static/htmx.min.js"></script>
 <style>
-  /* Bootstrap 5 exposes --bs-primary + a matching -rgb triplet
-     used for translucent variants (alerts, focus rings, .bg-*-
-     subtle). Overriding both here re-tints every stock component
+  /* Palette anchor for the three-service trio (bty navy,
+     withcache dark-magenta, nbdmux magenta). Bootstrap 5
+     exposes --bs-primary + a matching -rgb triplet used for
+     translucent variants (alerts, focus rings, .bg-*-subtle).
+     Overriding both here re-tints every stock component
      without patching bootstrap.min.css. */
   :root {{
     --bs-primary: {primary};
@@ -1157,51 +1166,254 @@ class Handler(http.server.BaseHTTPRequestHandler):
     --bs-link-color: {primary};
     --bs-link-hover-color: {hover};
   }}
-  .btn-primary {{ --bs-btn-bg: {primary}; --bs-btn-border-color: {primary};
-                 --bs-btn-hover-bg: {hover}; --bs-btn-hover-border-color: {hover};
-                 --bs-btn-active-bg: {hover}; --bs-btn-active-border-color: {hover}; }}
+  .btn-primary {{
+    --bs-btn-bg: {primary};
+    --bs-btn-border-color: {primary};
+    --bs-btn-hover-bg: {hover};
+    --bs-btn-hover-border-color: {hover};
+    --bs-btn-active-bg: {hover};
+    --bs-btn-active-border-color: {hover};
+  }}
   .bg-primary {{ --bs-bg-opacity: 1; background-color: {primary} !important; }}
   .text-primary {{ --bs-text-opacity: 1; color: {primary} !important; }}
   .border-primary {{ --bs-border-opacity: 1; border-color: {primary} !important; }}
-  /* Brand strip: navy -> dark-magenta -> magenta gradient shared
-     across bty (navy), withcache (dark-magenta) and nbdmux
-     (magenta) so the trio reads as one product family from any
-     of the three consoles. */
-  .brand-accent {{ height: 3px;
-    background: linear-gradient(90deg, #0d3585 0%, #8f1b71 50%, #d63384 100%); }}
+  /* Brand strip: a thin gradient accent above the navbar.
+     Stable across themes; defined inline rather than in
+     bootstrap.min.css so it renders even when the CSS load
+     races the initial paint. Shared navy -> dark-magenta ->
+     magenta gradient across bty (navy), withcache
+     (dark-magenta) and nbdmux (magenta) so the trio reads as
+     one product family from any of the three consoles. */
+  .brand-accent {{
+    height: 3px;
+    background: linear-gradient(90deg, #0d3585 0%, #8f1b71 50%, #d63384 100%);
+  }}
+  /* The accent + navbar + sub-nav pin to the top as one unit so
+     the sub-nav jump links stay visible while scrolling. */
+  .sticky-header {{
+    position: sticky;
+    top: 0;
+    z-index: 1030;
+  }}
+  /* In-page ``#anchor`` jumps (the sub-nav tab pills) land below
+     the sticky header instead of under it. */
+  html {{
+    scroll-padding-top: 6.5rem;
+    scroll-behavior: smooth;
+  }}
+  /* Brand pill keeps the same padding + radius everywhere; the
+     ``brand-active`` variant lights up on the home page so the
+     brand doubles as a Home indicator. */
+  .navbar-brand {{
+    border-radius: 0.5rem;
+    padding-left: 0.6rem;
+    padding-right: 0.6rem;
+    margin-right: 0.25rem;
+    transition: background-color 0.15s;
+  }}
+  .navbar-brand.brand-active {{
+    background-color: rgba({rgb}, 0.85);
+  }}
+  .navbar-brand:hover {{
+    background-color: rgba(255, 255, 255, 0.06);
+  }}
+  .navbar-brand.brand-active:hover {{
+    background-color: rgba({rgb}, 0.95);
+  }}
+  /* Version sits in the navbar alongside the brand pill but
+     OUTSIDE it -- so the brand button stays a clean click target
+     and the version reads as adjacent metadata. */
+  .navbar-version {{
+    color: rgba(255, 255, 255, 0.55);
+    font-weight: 400;
+    font-size: 0.85rem;
+    align-self: center;
+    white-space: nowrap;
+  }}
+  .navbar-brand .brand-icon {{
+    /* Sized to match bty's mascot PNG (1.05rem tall). Using a
+       Bootstrap Icon rather than an image keeps the shell
+       stdlib-only. */
+    font-size: 1.05rem;
+    vertical-align: -0.05rem;
+  }}
+  .navbar .nav-btn {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.8rem;
+    margin-right: 0.25rem;
+    border-radius: 0.5rem;
+    color: rgba(255, 255, 255, 0.85);
+    text-decoration: none;
+    transition: background-color 0.15s;
+  }}
+  .navbar .nav-btn:hover {{
+    background-color: rgba(255, 255, 255, 0.10);
+    color: #fff;
+  }}
+  .navbar .nav-btn.active {{
+    background-color: {primary};
+    color: #fff;
+    box-shadow: 0 0 0 1px rgba({rgb}, 0.6);
+  }}
+  .navbar .nav-btn i {{
+    font-size: 1.05rem;
+  }}
+  /* User-bar: a single pill containing username + logout, with a
+     thin vertical divider between them. Visually one widget,
+     but two click targets and zero JavaScript. */
+  .user-bar {{
+    display: inline-flex;
+    align-items: stretch;
+    border-radius: 999px;
+    background-color: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    overflow: hidden;
+    font-size: 0.85rem;
+  }}
+  .user-bar-name {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.8rem;
+    color: rgba(255, 255, 255, 0.92);
+  }}
+  .user-bar-name code {{
+    color: #fff;
+    background: transparent;
+    padding: 0;
+  }}
+  .user-bar-divider {{
+    width: 1px;
+    background-color: rgba(255, 255, 255, 0.18);
+  }}
+  .user-bar-action {{
+    display: inline-flex;
+    align-items: center;
+    padding: 0.35rem 0.7rem;
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.85);
+    text-decoration: none;
+    transition: background-color 0.15s, color 0.15s;
+  }}
+  .user-bar-action:hover,
+  .user-bar-action:focus {{
+    background-color: rgba(255, 255, 255, 0.10);
+    color: #fff;
+    outline: none;
+  }}
+  .user-bar-action.active {{
+    background-color: rgba(255, 255, 255, 0.16);
+    color: #fff;
+  }}
+  /* Logout hover keeps the danger-red signal so it doesn't
+     look indistinguishable from the account action. */
+  .user-bar-logout:hover,
+  .user-bar-logout:focus {{
+    background-color: rgba(220, 53, 69, 0.65);
+    color: #fff;
+  }}
+  /* Sub-nav strip. Sits immediately below the main ``bg-dark``
+     navbar; coloured CLEARLY lighter so it reads as "second-tier
+     nav, still chrome". Same ``#495057`` (--bs-gray-700) bty
+     uses so the boundary is unambiguous regardless of theme. */
+  .subnav-strip {{
+    background-color: #495057;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }}
+  .subnav-strip > .container {{
+    min-height: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }}
+  .subnav-strip .form-control-sm,
+  .subnav-strip .btn-sm,
+  .subnav-strip a,
+  .subnav-strip label,
+  .subnav-strip .small,
+  .subnav-strip small {{
+    font-size: inherit;
+    line-height: inherit;
+  }}
+  .subnav-strip .form-control-sm,
+  .subnav-strip .btn-sm {{
+    padding-top: 0.15rem;
+    padding-bottom: 0.15rem;
+  }}
+  .subnav-strip .nav-pills {{
+    gap: 0.25rem;
+  }}
+  .subnav-strip .nav-pills .nav-link {{
+    color: rgba(255, 255, 255, 0.78);
+    padding: 0.15rem 0.55rem;
+  }}
+  .subnav-strip .nav-pills .nav-link:hover {{
+    color: #fff;
+    background-color: rgba(255, 255, 255, 0.10);
+  }}
+  .subnav-strip .nav-pills .nav-link.active-tab {{
+    color: #fff;
+    background-color: {primary};
+  }}
+  .subnav-strip .text-muted {{
+    color: rgba(255, 255, 255, 0.55) !important;
+  }}
+  .subnav-strip code {{
+    color: rgba(255, 255, 255, 0.85);
+    background-color: transparent;
+  }}
+  .subnav-strip a {{
+    color: rgba(255, 255, 255, 0.78);
+  }}
+  .subnav-strip a:hover {{
+    color: #fff;
+  }}
+  /* Withcache-specific bits kept minimal. Everything else
+     inherits from Bootstrap + the chrome above. */
   code {{ color: inherit; font-size: .85em; }}
   .url {{ word-break: break-all; }}
   .num {{ text-align: right; }}
   .mono {{ font-family: var(--bs-font-monospace); font-size: .85em; }}
   #spin {{ width: 7rem; height: .5rem; margin: 0; }}
-  /* Tabs: Bootstrap nav-tabs, tinted via the active class. The
-     content panels toggle visibility via ``section.tab.active-tab``
-     so the same 1 Hz htmx innerHTML swap that used to work with
-     the Pico shell keeps working here without changing the JS. */
-  nav.tabs .nav-link {{ color: var(--bs-secondary-color); border: none;
-    border-bottom: 2px solid transparent; padding: .45rem .9rem;
-    font-size: .9rem; margin-bottom: -1px; }}
-  nav.tabs .nav-link:hover {{ color: var(--bs-body-color); }}
-  nav.tabs .nav-link.active-tab {{ color: var(--bs-body-color);
-    border-bottom-color: var(--bs-primary); font-weight: 600; }}
-  section.tab {{ display: none; padding-top: .75rem; }}
+  /* Tab content panels: shown only when the section carries
+     ``.active-tab``. Same hook the previous nav-tabs code used;
+     unchanged so the existing htmx post-swap script keeps
+     working. */
+  section.tab {{ display: none; padding-top: .25rem; }}
   section.tab.active-tab {{ display: block; }}
 </style>
 </head>"""
 
     def render_login(self, error: str = "") -> str:
+        """The unauthenticated shell: accent strip + dark navbar with the
+        brand pill (no user-bar since there's no session), then a
+        centered login card. Same chrome the authenticated page uses,
+        so the operator sees continuity across the auth boundary."""
         err = f'<div class="alert alert-danger">{html.escape(error)}</div>' if error else ""
         return f"""{self._head("withcache - login")}
-<body>
+<body class="bg-light">
+<div class="sticky-header">
 <div class="brand-accent"></div>
-<main class="container py-5">
-  <div class="card mx-auto" style="max-width: 24rem;">
+<nav class="navbar navbar-expand-md bg-dark navbar-dark py-2">
+    <div class="container">
+        <a class="navbar-brand fw-semibold brand-active" href="/">
+            <i class="bi bi-database brand-icon me-1"></i>WITHCACHE
+        </a>
+        <span class="navbar-version">v{html.escape(__version__)}</span>
+    </div>
+</nav>
+</div>
+<main class="container">
+  <div class="card mx-auto mt-5" style="max-width: 24rem;">
     <div class="card-body">
-      <h3 class="card-title fw-bold text-primary">
-        <i class="bi bi-hdd-stack"></i> withcache
-        <small class="text-muted fs-6">v{html.escape(__version__)}</small>
-      </h3>
-      <p class="text-muted small mb-3">Operator login</p>
+      <h5 class="card-title mb-3">Operator login</h5>
       {err}
       <form method="post" action="/ui/login">
         <div class="mb-3">
@@ -1215,29 +1427,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
 </main></body></html>"""
 
     def render_page(self) -> str:
-        logout = (
-            '<form method="post" action="/ui/logout" class="d-inline m-0">'
-            '<button type="submit" class="btn btn-sm btn-outline-secondary">'
-            "Log out</button></form>"
+        """The authenticated shell: sticky-header wrapping the accent
+        strip, the dark navbar (brand pill + version + user-bar), and
+        the subnav strip carrying the tab pills. Then main.container
+        with the "Add from URI" card and the htmx-swapped #dash
+        region. Same chrome bty uses; only ``--bs-primary`` differs."""
+        user_bar = (
+            '<div class="user-bar mt-2 mt-md-0" title="Operator session">'
+            '<span class="user-bar-name">'
+            '<i class="bi bi-person-circle"></i><code>operator</code>'
+            "</span>"
+            '<span class="user-bar-divider"></span>'
+            '<form action="/ui/logout" method="post" class="m-0 d-inline-flex">'
+            '<button type="submit" class="user-bar-action user-bar-logout" title="Sign out">'
+            '<i class="bi bi-box-arrow-right"></i>'
+            "</button></form>"
+            "</div>"
             if self.auth.enabled
             else ""
         )
         return f"""{self._head("withcache cache-host")}
-<body>
+<body class="bg-light">
+<!-- Sticky header: the accent strip, the main navbar, and the
+     sub-nav strip travel together and pin to the top so the tab
+     pills stay reachable while scrolling a long list. -->
+<div class="sticky-header">
 <div class="brand-accent"></div>
-<nav class="navbar navbar-expand navbar-light bg-light border-bottom">
-  <div class="container">
-    <a class="navbar-brand fw-bold text-primary" href="/">
-      <i class="bi bi-hdd-stack"></i> withcache
-      <span class="badge bg-primary bg-opacity-10 text-primary ms-1"
-        >v{html.escape(__version__)}</span>
-    </a>
-    <div class="d-flex align-items-center gap-3">
-      <progress id="spin" class="htmx-indicator"></progress>
-      {logout}
+<nav class="navbar navbar-expand-md bg-dark navbar-dark py-2">
+    <div class="container">
+        <a class="navbar-brand fw-semibold brand-active" href="/">
+            <i class="bi bi-database brand-icon me-1"></i>WITHCACHE
+        </a>
+        <div class="d-flex flex-grow-1 align-items-center flex-wrap">
+            <div class="me-auto d-flex flex-wrap">
+                <!-- withcache is a single-page dashboard: no middle
+                     nav-btns. me-auto pushes version + user-bar right. -->
+            </div>
+            <span class="navbar-version me-2">v{html.escape(__version__)}</span>
+            {user_bar}
+        </div>
     </div>
-  </div>
 </nav>
+
+<!-- Sub-nav strip. Carries the five tab pills below the main
+     navbar; visually attached (same sticky container, #495057
+     background) but rendered STATIC here so tab labels don't
+     flicker on the 1 Hz htmx dashboard swap. Per-tab counts live
+     in the summary line inside the dash content and update on
+     every swap. -->
+<div class="subnav-strip">
+  <div class="container">
+    <ul class="nav nav-pills flex-nowrap flex-md-wrap">
+      <li class="nav-item"><a class="nav-link" href="#tab-cached">Cached</a></li>
+      <li class="nav-item"><a class="nav-link" href="#tab-streams">Streams</a></li>
+      <li class="nav-item"><a class="nav-link" href="#tab-downloads">Downloads</a></li>
+      <li class="nav-item"><a class="nav-link" href="#tab-misses">Misses</a></li>
+      <li class="nav-item"><a class="nav-link" href="#tab-catalog">Catalog</a></li>
+      <span class="ms-auto"><progress id="spin" class="htmx-indicator"></progress></span>
+    </ul>
+  </div>
+</div>
+</div><!-- /.sticky-header -->
+
 <main class="container py-4">
   <div class="card mb-4">
     <div class="card-header"><i class="bi bi-cloud-download text-primary"></i> Add from URI</div>
@@ -1256,15 +1507,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
   <!-- The hx-trigger gates polling on the user NOT having an active
        text selection, so highlight-and-copy a URL out of a table cell
-       isn't wiped by the 1 Hz refresh. ``isCollapsed`` is true when
-       there's no selection or the caret is a zero-width point; once
-       the operator releases / clears the selection polling resumes
-       on the next 1 s tick.
-       ``hx-headers`` sends the current URL hash (the active tab id)
-       as ``X-Active-Tab`` on every refresh so the server can bake
-       ``.active-tab`` into the rendered HTML -- eliminating the
-       visible flicker the post-swap JS-applied class would otherwise
-       cause when the new innerHTML lands without the class. -->
+       isn't wiped by the 1 Hz refresh. hx-headers sends the current
+       URL hash (the active tab id) as X-Active-Tab on every refresh
+       so the server can bake .active-tab into the rendered HTML,
+       eliminating the visible flicker the post-swap JS-applied class
+       would otherwise cause when the new innerHTML lands. -->
   <div id="dash" hx-get="/admin/dash"
        hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
        hx-swap="innerHTML"
@@ -1272,16 +1519,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     {self.render_dash(active_tab=(self.headers.get("X-Active-Tab") or "").strip())}
   </div>
 
-  <!-- Tab activation. Applies an ``active-tab`` class to the
-       ``section.tab`` whose id matches the URL hash (defaulting to
-       the first section when no hash is set) and to the
-       corresponding ``nav.tabs a``. Runs on initial load, on every
-       click into a tab link (so the operator gets immediate
-       feedback before the next htmx tick), and on every
-       ``htmx:afterSettle`` so the class survives the 1 Hz
-       innerHTML replacement of ``#dash``. Without this the
-       previous ``:target``-based CSS would snap the operator back
-       to the first tab within a second of any click. -->
+  <!-- Tab activation: apply .active-tab to the section (inside
+       #dash) AND to the matching subnav pill (outside #dash) whose
+       id/hash matches the current URL hash. Runs on hashchange, on
+       click into a tab link, and on every htmx:afterSettle so the
+       class survives the 1 Hz innerHTML replacement of #dash.
+       Subnav pills live outside #dash so the JS-applied class on
+       them is not touched by the swap; sections inside #dash also
+       get the class baked server-side (via X-Active-Tab) so there
+       is no visible flicker between swap and JS re-apply. -->
   <script>
     (function () {{
       function applyActiveTab() {{
@@ -1293,7 +1539,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         sections.forEach(function (s) {{
           s.classList.toggle('active-tab', s.id === hash);
         }});
-        document.querySelectorAll('#dash nav.tabs a').forEach(function (a) {{
+        document.querySelectorAll('.subnav-strip .nav-pills .nav-link').forEach(function (a) {{
           var target = (a.getAttribute('href') || '').replace(/^#/, '');
           a.classList.toggle('active-tab', target === hash);
         }});
@@ -1301,7 +1547,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
       window.addEventListener('hashchange', applyActiveTab);
       document.body.addEventListener('htmx:afterSettle', applyActiveTab);
       document.addEventListener('click', function (ev) {{
-        var a = ev.target.closest && ev.target.closest('#dash nav.tabs a');
+        var a = ev.target.closest && ev.target.closest('.subnav-strip .nav-pills .nav-link');
         if (a) setTimeout(applyActiveTab, 0);
       }});
       applyActiveTab();
@@ -1317,7 +1563,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # 1 Hz refresh (and on every operator click via the same
         # script that watches hashchange). Unknown / empty value
         # defaults to the first tab.
-        _TAB_IDS = ("tab-cached", "tab-streams", "tab-downloads", "tab-misses")
+        _TAB_IDS = ("tab-cached", "tab-streams", "tab-downloads", "tab-misses", "tab-catalog")
         if active_tab not in _TAB_IDS:
             active_tab = _TAB_IDS[0]
 
@@ -1442,24 +1688,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         njobs = len(jobs)
 
         catalog_rows = self._catalog_rows()
+        ncatalog = len(self.catalog.entries)
 
+        # The per-tab count summary lives here (inside the htmx-swapped
+        # region) so it updates every second. Tab labels themselves
+        # live in the static sub-nav strip in ``render_page`` per bty
+        # convention -- labels are chrome, counts are content.
         return f"""
-  <p class="text-muted small mb-2">{nblobs} cached ({used}){full}
-    &middot; {nmisses} pending miss(es)</p>
-  <nav class="tabs border-bottom mb-2">
-    <ul class="nav">
-      <li class="nav-item"><a class="nav-link {_active("tab-cached").lstrip()}"
-        href="#tab-cached">Cached ({nblobs})</a></li>
-      <li class="nav-item"><a class="nav-link {_active("tab-streams").lstrip()}"
-        href="#tab-streams">Streams ({nstreams})</a></li>
-      <li class="nav-item"><a class="nav-link {_active("tab-downloads").lstrip()}"
-        href="#tab-downloads">Downloads ({njobs})</a></li>
-      <li class="nav-item"><a class="nav-link {_active("tab-misses").lstrip()}"
-        href="#tab-misses">Misses ({nmisses})</a></li>
-      <li class="nav-item"><a class="nav-link {_active("tab-catalog").lstrip()}"
-        href="#tab-catalog">Catalog ({len(self.catalog.entries)})</a></li>
-    </ul>
-  </nav>
+  <p class="text-muted small mb-3">
+    <span class="badge bg-primary bg-opacity-10 text-primary me-1">{nblobs} cached ({used}){
+            full
+        }</span>
+    <span class="badge bg-secondary bg-opacity-10 text-secondary me-1">{nstreams} streams</span>
+    <span class="badge bg-secondary bg-opacity-10 text-secondary me-1">{njobs} downloads</span>
+    <span class="badge bg-secondary bg-opacity-10 text-secondary me-1">{nmisses} misses</span>
+    <span class="badge bg-secondary bg-opacity-10 text-secondary">{ncatalog} catalog</span>
+  </p>
 
   <section id="tab-cached" class="tab{_active("tab-cached")}">
     <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
