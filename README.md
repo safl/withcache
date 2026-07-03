@@ -43,7 +43,7 @@ optional **operator-curated** model (`--curate`: a miss queue a human approves).
 
 | Path                          | What it is                                                  |
 |-------------------------------|-------------------------------------------------------------|
-| `src/withcache/server.py`     | The cache-host: blob store + miss table + **background download manager** + operator UI (Pico.css + HTMX) |
+| `src/withcache/server.py`     | The cache-host: blob store + miss table + **background download manager** + operator UI (Bootstrap 5 + Bootstrap Icons + HTMX) |
 | `src/withcache/_shim.py`      | Shared shim core (find URL → probe → rewrite → exec)        |
 | `src/withcache/curlwithcache.py` / `wgetwithcache.py` | The Python `curl` / `wget` shims    |
 | `shim/shim.zig`               | The native shim: one static binary, both tools via `argv[0]` |
@@ -219,11 +219,13 @@ Notes & limits (all degrade gracefully; worst case is "no caching, curl still wo
 
 ## Operator UI
 
-`http://withcache-server:8081/` (Pico.css + HTMX, bundled offline) shows:
+`http://withcache-server:8081/` (Bootstrap 5 + Bootstrap Icons + HTMX, bundled
+offline; matches bty's chrome for a consistent trio) is a five-page dashboard:
+- **Cached** (landing): URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at, each with **Delete** to free space.
+- **Streams**: in-flight stream-through-and-store fetches serving bytes to a client while writing to disk.
+- **Downloads**: live progress bars, `queued/running/completed/cancelled/failed`, **Cancel**, and **Clear finished**. Downloads run in a background worker pool, not in the request, so large pulls never block, modelled on [bty]'s job managers. The subnav Fetch form pre-seeds an artifact before anyone misses it.
 - **Misses**: auto-fetched by default, or (under `--curate`) each with **Download** (queues a background pull) and **Dismiss**.
-- **Downloads**: live progress bars, `queued/running/completed/cancelled/failed`, **Cancel**, and **Clear finished**. Downloads run in a background worker pool, not in the request, so large pulls never block, modelled on [bty]'s job managers.
-- **Cached artifacts**: URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at, each with **Delete** to free space.
-- **Add from URI**: pre-seed an artifact before anyone misses it.
+- **Catalog**: image catalog fetched from a nosi-style `catalog.toml` (URL configurable via `$WITHCACHE_CATALOG_URL` or the subnav Set&fetch input); pre-seed by URL via the "Add image from oras" input.
 
 ## Auth
 
