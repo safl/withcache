@@ -1062,10 +1062,10 @@ class TestMultiPageNavigation(unittest.TestCase):
                 self.assertIn(f'id="{key}-fragment"', body)
                 self.assertIn('class="nav-btn active"', body)
 
-    def test_downloads_subnav_has_add_from_uri(self):
+    def test_downloads_subnav_has_fetch_form(self):
         body = self._get("/ui/downloads")
         self.assertIn('hx-post="/admin/fetch"', body)
-        self.assertIn("Add from URI", body)
+        self.assertIn(">Fetch</button>", body)
 
     def test_catalog_subnav_has_url_and_oras_forms(self):
         body = self._get("/ui/catalog")

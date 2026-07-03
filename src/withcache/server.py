@@ -6,7 +6,7 @@ their origin URL. By default a cache miss is auto-fetched: it is recorded in the
 miss table and pulled from origin in the background, so the next request hits
 (the client falls through to origin on the first miss). Run with `--curate` to
 require an operator to approve each pull via a small web UI instead; either way
-you can pre-seed an artifact with the "Add from URI" form.
+you can pre-seed an artifact with the Downloads-page Fetch form.
 
 This is the only component that needs internet egress (and any vendor creds).
 Clients never write to it.
@@ -1884,7 +1884,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '<input class="form-control form-control-sm" type="url" name="url" '
             'style="width: 22rem;" '
             'placeholder="https://origin/path/artifact.tar.gz" required>'
-            '<button class="btn btn-sm btn-primary" type="submit" title="Add from URI"'
+            '<button class="btn btn-sm btn-primary" type="submit" title="Fetch URI"'
             ">Fetch</button>"
             "</form>"
         )
