@@ -1690,13 +1690,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         subnav_html: str,
         body_html: str,
     ) -> str:
+        brand_cls = "navbar-brand fw-semibold"
+        if nav_active == "cached":
+            brand_cls += " brand-active"
         return f"""{self._head(title)}
 <body class="bg-light">
 <div class="sticky-header">
 <div class="brand-accent"></div>
 <nav class="navbar navbar-expand-md bg-dark navbar-dark py-2">
     <div class="container">
-        <a class="navbar-brand fw-semibold" href="/ui/cached">
+        <a class="{brand_cls}" href="/ui/cached">
             <i class="bi bi-database brand-icon me-1"></i>WITHCACHE
         </a>
         <div class="d-flex flex-grow-1 align-items-center flex-wrap">
