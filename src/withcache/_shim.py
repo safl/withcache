@@ -26,7 +26,7 @@ _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 
 
 def cache_base(server: str) -> str:
-    """Accept 'host', 'host:3000', or 'http://withcache-server:3000'."""
+    """Accept 'host', 'host:8081', or 'http://withcache-server:8081'."""
     server = server.strip().rstrip("/")
     if "://" not in server:
         server = "http://" + server

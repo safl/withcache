@@ -16,7 +16,7 @@ Both modules are stdlib-only, so this example has no third-party dependencies.
 
 Usage::
 
-    WITHCACHE_SERVER=http://cache:3000 \\
+    WITHCACHE_SERVER=http://cache:8081 \\
         python pull_oras_blob.py oras://ghcr.io/<owner>/<repo>@sha256:<digest> out.bin
 
 Omit ``WITHCACHE_SERVER`` to pull straight from the registry.

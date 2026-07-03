@@ -481,8 +481,8 @@ class TestAgeHuman(unittest.TestCase):
 # --------------------------------------------------------------------------
 class TestShim(unittest.TestCase):
     def test_cache_base(self):
-        self.assertEqual(_shim.cache_base("box:3000"), "http://box:3000")
-        self.assertEqual(_shim.cache_base("https://box:3000/"), "https://box:3000")
+        self.assertEqual(_shim.cache_base("box:8081"), "http://box:8081")
+        self.assertEqual(_shim.cache_base("https://box:8081/"), "https://box:8081")
 
     def test_find_url_bare(self):
         self.assertEqual(
@@ -540,11 +540,11 @@ class TestShim(unittest.TestCase):
             for k in ("WITHCACHE_SERVER", "CURLWITHCACHE_SERVER", "WGETWITHCACHE_SERVER")
         }
         try:
-            os.environ["WITHCACHE_SERVER"] = "http://shared:3000"
-            os.environ["CURLWITHCACHE_SERVER"] = "http://curl-only:3000"
+            os.environ["WITHCACHE_SERVER"] = "http://shared:8081"
+            os.environ["CURLWITHCACHE_SERVER"] = "http://curl-only:8081"
             os.environ.pop("WGETWITHCACHE_SERVER", None)
-            self.assertEqual(_shim.env_server("curl"), "http://curl-only:3000")
-            self.assertEqual(_shim.env_server("wget"), "http://shared:3000")
+            self.assertEqual(_shim.env_server("curl"), "http://curl-only:8081")
+            self.assertEqual(_shim.env_server("wget"), "http://shared:8081")
         finally:
             for k, v in saved.items():
                 if v is None:
@@ -593,22 +593,22 @@ class TestShimPlan(unittest.TestCase):
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
     def test_hit_rewrites_only_the_url(self):
-        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:8081"
         argv = ["-fsSL", "https://h/p/cuda.tar.gz", "-o", "out"]
         real, final = _shim.plan("curl", lambda r, u: True, argv)
         self.assertEqual(real, self.dummy)
         self.assertEqual([final[0], final[2], final[3]], ["-fsSL", "-o", "out"])
-        self.assertTrue(final[1].startswith("http://cache:3000/b/"))
+        self.assertTrue(final[1].startswith("http://cache:8081/b/"))
         self.assertTrue(final[1].endswith("/cuda.tar.gz"))
 
     def test_miss_leaves_argv_untouched(self):
-        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:8081"
         argv = ["https://h/x", "-O"]
         _, final = _shim.plan("curl", lambda r, u: False, argv)
         self.assertEqual(final, argv)
 
     def test_unreachable_leaves_argv_untouched(self):
-        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:8081"
         argv = ["https://h/x"]
         _, final = _shim.plan("curl", lambda r, u: None, argv)
         self.assertEqual(final, argv)

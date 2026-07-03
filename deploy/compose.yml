@@ -9,7 +9,7 @@ services:
     image: withcache:latest
     container_name: withcache
     ports:
-      - "3000:3000"
+      - "8081:8081"
     environment:
       # Protect the operator UI. Unset => UI is open (a warning is logged).
       - WITHCACHE_ADMIN_PASSWORD=${WITHCACHE_ADMIN_PASSWORD:-}

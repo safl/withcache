@@ -7,7 +7,7 @@ dependencies.
     from withcache import client
 
     # "use the cache when it's warm, the origin otherwise"
-    url = client.serve_url("http://cache:3000", origin) or origin
+    url = client.serve_url("http://cache:8081", origin) or origin
 
 The ``/b/<urlsafe-b64(origin)>/<basename>`` encoding is shared with the shims
 and the server (one definition in :mod:`withcache._shim`), so consumers stay in
@@ -25,7 +25,7 @@ __all__ = ["PROBE_TIMEOUT", "blob_url", "cache_base", "is_cached", "serve_url"]
 
 PROBE_TIMEOUT = 3.0  # seconds; never block the caller on a slow/unreachable cache
 
-#: Normalize a server value: accepts 'host', 'host:3000', or 'http://host:3000'.
+#: Normalize a server value: accepts 'host', 'host:8081', or 'http://host:8081'.
 cache_base = _shim.cache_base
 
 

@@ -82,13 +82,13 @@ asserts the binary and the Python `plan()` rewrite argv identically.
 ```sh
 export WITHCACHE_ADMIN_PASSWORD=change-me    # protects the operator UI
 podman compose -f deploy/compose.yml up -d   # or: docker compose -f ...
-# operator UI:  http://withcache-server:3000/
+# operator UI:  http://withcache-server:8081/
 ```
 
 Or without containers:
 
 ```sh
-WITHCACHE_ADMIN_PASSWORD=change-me withcache-server --data-dir ./data --port 3000
+WITHCACHE_ADMIN_PASSWORD=change-me withcache-server --data-dir ./data --port 8081
 ```
 
 Data (blobs + `cache.db` + `session-secret`) lives in the `/data` volume (or
@@ -119,7 +119,7 @@ Nothing is renamed; you opt in per command. Good for trying it out or a script
 you can edit.
 
 ```sh
-export WITHCACHE_SERVER=http://withcache-server:3000
+export WITHCACHE_SERVER=http://withcache-server:8081
 curlwithcache -fsSL https://the/origin/cuda.tar.gz -o cuda.tar.gz
 wgetwithcache https://the/origin/rocm.tar.gz
 ```
@@ -134,7 +134,7 @@ mkdir -p ~/.withcache/bin
 ln -sf "$(command -v curlwithcache)" ~/.withcache/bin/curl
 ln -sf "$(command -v wgetwithcache)" ~/.withcache/bin/wget
 
-export WITHCACHE_SERVER=http://withcache-server:3000
+export WITHCACHE_SERVER=http://withcache-server:8081
 export PATH="$HOME/.withcache/bin:$PATH"
 hash -r                       # forget any cached curl/wget location
 
@@ -156,7 +156,7 @@ ln -sf "$(command -v wgetwithcache)" ~/.withcache/bin/wget
 cat >> ~/.bashrc <<'EOF'
 
 # withcache: transparent curl/wget caching
-export WITHCACHE_SERVER=http://withcache-server:3000
+export WITHCACHE_SERVER=http://withcache-server:8081
 export PATH="$HOME/.withcache/bin:$PATH"
 EOF
 ```
@@ -168,7 +168,7 @@ inside that directory.
 
 ```sh
 # .envrc
-export WITHCACHE_SERVER=http://withcache-server:3000
+export WITHCACHE_SERVER=http://withcache-server:8081
 PATH_add ~/.withcache/bin        # assumes the symlinks from approach 2/3 exist
 ```
 
@@ -186,7 +186,7 @@ sudo ln -sf "$(command -v wgetwithcache)" /usr/local/bin/wget
 
 # A login-shell env file (covers interactive logins; daemons started outside a
 # login shell won't see it; set WITHCACHE_SERVER in their unit if you need it).
-echo 'export WITHCACHE_SERVER=http://withcache-server:3000' \
+echo 'export WITHCACHE_SERVER=http://withcache-server:8081' \
   | sudo tee /etc/profile.d/withcache.sh >/dev/null
 ```
 
@@ -219,7 +219,7 @@ Notes & limits (all degrade gracefully; worst case is "no caching, curl still wo
 
 ## Operator UI
 
-`http://withcache-server:3000/` (Pico.css + HTMX, bundled offline) shows:
+`http://withcache-server:8081/` (Pico.css + HTMX, bundled offline) shows:
 - **Misses**: auto-fetched by default, or (under `--curate`) each with **Download** (queues a background pull) and **Dismiss**.
 - **Downloads**: live progress bars, `queued/running/completed/cancelled/failed`, **Cancel**, and **Clear finished**. Downloads run in a background worker pool, not in the request, so large pulls never block, modelled on [bty]'s job managers.
 - **Cached artifacts**: URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at, each with **Delete** to free space.
@@ -258,7 +258,7 @@ scheme. `withcache.client` is stdlib-only, so importing it adds no dependencies:
 from withcache import client
 
 # "use the cache when it's warm, the origin otherwise"
-url = client.serve_url("http://cache:3000", origin) or origin
+url = client.serve_url("http://cache:8081", origin) or origin
 ```
 
 `is_cached()` is a graceful `HEAD` (a miss, timeout, or unreachable cache all
