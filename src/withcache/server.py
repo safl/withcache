@@ -58,7 +58,14 @@ USER_AGENT = f"withcache-cache/{__version__}"
 # operating depth.
 RESUME_MAX_ATTEMPTS = 5
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-MIME_TYPES = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8"}
+MIME_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+}
 _DB_WRITE_LOCK = threading.Lock()
 
 
@@ -840,14 +847,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.headers.get("HX-Request") == "true"
 
     def serve_static(self, parsed):
-        name = os.path.basename(parsed.path)  # basename blocks path traversal
-        path = os.path.join(STATIC_DIR, name)
-        if not name or not os.path.isfile(path):
+        """Serve files under ``src/withcache/static/`` (Bootstrap CSS +
+        Bootstrap Icons CSS + htmx.min.js + the icon font files under
+        ``static/fonts/`` that bootstrap-icons.min.css references via
+        a relative ``fonts/…`` src). Constrain to ``static/`` and
+        ``static/fonts/`` explicitly; abspath+startswith rejects any
+        ``..`` traversal past the static root."""
+        rel = parsed.path[len("/static/") :]
+        if not rel or rel.endswith("/"):
             self.send_text(404, "not found\n")
             return
-        with open(path, "rb") as f:
+        target = os.path.abspath(os.path.join(STATIC_DIR, rel))
+        static_root = os.path.abspath(STATIC_DIR) + os.sep
+        if not target.startswith(static_root) or not os.path.isfile(target):
+            self.send_text(404, "not found\n")
+            return
+        with open(target, "rb") as f:
             data = f.read()
-        ext = os.path.splitext(name)[1]
+        ext = os.path.splitext(target)[1]
         self.send_response(200)
         self.send_header("Content-Type", MIME_TYPES.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(data)))
@@ -1012,88 +1029,143 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # -- HTML --------------------------------------------------------------
     STATUS_COLORS: ClassVar[dict[str, str]] = {
-        "queued": "#888",
-        "running": "var(--pico-primary, #0172ad)",
-        "completed": "#2e7d32",
-        "failed": "#c0392b",
-        "cancelled": "#888",
+        "queued": "var(--bs-secondary)",
+        "running": "var(--bs-primary)",
+        "completed": "var(--bs-success)",
+        "failed": "var(--bs-danger)",
+        "cancelled": "var(--bs-secondary)",
     }
 
+    # bty ships a Bootstrap 5 stack (bootstrap.min.css +
+    # bootstrap-icons.min.css + htmx). All three ecosystem services
+    # (bty, nbdmux, withcache) share that stack so operators only
+    # learn one UI grammar; the primary hue is what tells them
+    # which service they're on. The trio sits on a
+    # navy -> dark-magenta -> magenta gradient (cool -> hot);
+    # withcache is the dark-magenta middle (the byte cache that
+    # feeds nbdmux and every other consumer).
+    _PRIMARY_HEX = "#8f1b71"  # dark-magenta
+    _PRIMARY_HOVER = "#7a1861"
+    _PRIMARY_RGB = "143, 27, 113"
+
     def _head(self, title: str) -> str:
+        primary = self._PRIMARY_HEX
+        hover = self._PRIMARY_HOVER
+        rgb = self._PRIMARY_RGB
         return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<link rel="stylesheet" href="/static/pico.min.css">
+<link rel="stylesheet" href="/static/bootstrap.min.css">
+<link rel="stylesheet" href="/static/bootstrap-icons.min.css">
 <script src="/static/htmx.min.js"></script>
 <style>
-  main.container {{ max-width: 1100px; padding-top: 1rem; }}
-  h4 {{ margin-bottom: .4rem; }}
-  table {{ font-size: .9rem; margin-bottom: 0; }}
+  /* Bootstrap 5 exposes --bs-primary + a matching -rgb triplet
+     used for translucent variants (alerts, focus rings, .bg-*-
+     subtle). Overriding both here re-tints every stock component
+     without patching bootstrap.min.css. */
+  :root {{
+    --bs-primary: {primary};
+    --bs-primary-rgb: {rgb};
+    --bs-link-color: {primary};
+    --bs-link-hover-color: {hover};
+  }}
+  .btn-primary {{ --bs-btn-bg: {primary}; --bs-btn-border-color: {primary};
+                 --bs-btn-hover-bg: {hover}; --bs-btn-hover-border-color: {hover};
+                 --bs-btn-active-bg: {hover}; --bs-btn-active-border-color: {hover}; }}
+  .bg-primary {{ --bs-bg-opacity: 1; background-color: {primary} !important; }}
+  .text-primary {{ --bs-text-opacity: 1; color: {primary} !important; }}
+  .border-primary {{ --bs-border-opacity: 1; border-color: {primary} !important; }}
+  /* Brand strip: navy -> dark-magenta -> magenta gradient shared
+     across bty (navy), withcache (dark-magenta) and nbdmux
+     (magenta) so the trio reads as one product family from any
+     of the three consoles. */
+  .brand-accent {{ height: 3px;
+    background: linear-gradient(90deg, #0d3585 0%, #8f1b71 50%, #d63384 100%); }}
+  code {{ color: inherit; font-size: .85em; }}
   .url {{ word-break: break-all; }}
   .num {{ text-align: right; }}
-  .mono {{ font-family: var(--pico-font-family-monospace); font-size: .85em; }}
-  td form {{ display: inline; margin: 0; }}
-  td button {{ width: auto; display: inline-block; margin: 0 .3rem 0 0;
-               padding: .15rem .6rem; font-size: .8rem; }}
-  td progress {{ margin: 0 0 .15rem; }}
+  .mono {{ font-family: var(--bs-font-monospace); font-size: .85em; }}
   #spin {{ width: 7rem; height: .5rem; margin: 0; }}
-  .row {{ display: flex; align-items: center; justify-content: space-between; }}
-  .err {{ background: var(--pico-del-color, #c0392b); color: #fff;
-          padding: .7rem 1rem; border-radius: var(--pico-border-radius); margin-bottom: 1rem; }}
+  /* Tabs: Bootstrap nav-tabs, tinted via the active class. The
+     content panels toggle visibility via ``section.tab.active-tab``
+     so the same 1 Hz htmx innerHTML swap that used to work with
+     the Pico shell keeps working here without changing the JS. */
+  nav.tabs .nav-link {{ color: var(--bs-secondary-color); border: none;
+    border-bottom: 2px solid transparent; padding: .45rem .9rem;
+    font-size: .9rem; margin-bottom: -1px; }}
+  nav.tabs .nav-link:hover {{ color: var(--bs-body-color); }}
+  nav.tabs .nav-link.active-tab {{ color: var(--bs-body-color);
+    border-bottom-color: var(--bs-primary); font-weight: 600; }}
+  section.tab {{ display: none; padding-top: .75rem; }}
+  section.tab.active-tab {{ display: block; }}
 </style>
 </head>"""
 
     def render_login(self, error: str = "") -> str:
-        err = f'<div class="err">{html.escape(error)}</div>' if error else ""
-        return f"""{self._head("withcache — login")}
-<body><main class="container">
-  <article style="max-width: 24rem; margin: 4rem auto;">
-    <hgroup>
-      <h2>withcache <small class="mono">v{html.escape(__version__)}</small></h2>
-      <p>operator login</p>
-    </hgroup>
-    {err}
-    <form method="post" action="/ui/login">
-      <input type="password" name="password" placeholder="Admin password" autofocus required>
-      <button type="submit">Log in</button>
-    </form>
-  </article>
+        err = f'<div class="alert alert-danger">{html.escape(error)}</div>' if error else ""
+        return f"""{self._head("withcache - login")}
+<body>
+<div class="brand-accent"></div>
+<main class="container py-5">
+  <div class="card mx-auto" style="max-width: 24rem;">
+    <div class="card-body">
+      <h3 class="card-title fw-bold text-primary">
+        <i class="bi bi-hdd-stack"></i> withcache
+        <small class="text-muted fs-6">v{html.escape(__version__)}</small>
+      </h3>
+      <p class="text-muted small mb-3">Operator login</p>
+      {err}
+      <form method="post" action="/ui/login">
+        <div class="mb-3">
+          <label class="form-label" for="pw">Admin password</label>
+          <input class="form-control" id="pw" type="password" name="password" autofocus required>
+        </div>
+        <button class="btn btn-primary w-100" type="submit">Log in</button>
+      </form>
+    </div>
+  </div>
 </main></body></html>"""
 
     def render_page(self) -> str:
         logout = (
-            '<li><form method="post" action="/ui/logout" style="margin:0">'
-            '<button type="submit" class="secondary outline" '
-            'style="width:auto;padding:.3rem .8rem">Log out</button></form></li>'
+            '<form method="post" action="/ui/logout" class="d-inline m-0">'
+            '<button type="submit" class="btn btn-sm btn-outline-secondary">'
+            "Log out</button></form>"
             if self.auth.enabled
             else ""
         )
         return f"""{self._head("withcache cache-host")}
-<body><main class="container">
-  <nav>
-    <ul><li>
-      <strong>withcache</strong>
-      &nbsp;<small class="mono">v{html.escape(__version__)}</small>
-    </li></ul>
-    <ul>
-      <li><progress id="spin" class="htmx-indicator"></progress></li>
+<body>
+<div class="brand-accent"></div>
+<nav class="navbar navbar-expand navbar-light bg-light border-bottom">
+  <div class="container">
+    <a class="navbar-brand fw-bold text-primary" href="/">
+      <i class="bi bi-hdd-stack"></i> withcache
+      <span class="badge bg-primary bg-opacity-10 text-primary ms-1"
+        >v{html.escape(__version__)}</span>
+    </a>
+    <div class="d-flex align-items-center gap-3">
+      <progress id="spin" class="htmx-indicator"></progress>
       {logout}
-    </ul>
-  </nav>
-
-  <h4>Add from URI</h4>
-  <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML"
-        hx-indicator="#spin" hx-on::after-request="this.reset()">
-    <fieldset role="group">
-      <input type="url" name="url" placeholder="https://origin/path/artifact.tar.gz" required>
-      <!-- white-space: nowrap so the label "Fetch & store" stays on
-           one line; default flex-grow inside fieldset[role=group]
-           shrinks the button to content width, which on a narrow
-           viewport wrapped the ampersand to a second line. -->
-      <button type="submit" style="white-space: nowrap;">Fetch &amp; store</button>
-    </fieldset>
-  </form>
+    </div>
+  </div>
+</nav>
+<main class="container py-4">
+  <div class="card mb-4">
+    <div class="card-header"><i class="bi bi-cloud-download text-primary"></i> Add from URI</div>
+    <div class="card-body">
+      <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML"
+            hx-indicator="#spin" hx-on::after-request="this.reset()">
+        <div class="input-group">
+          <input class="form-control" type="url" name="url"
+            placeholder="https://origin/path/artifact.tar.gz" required>
+          <button class="btn btn-primary" type="submit" style="white-space: nowrap;"
+            >Fetch &amp; store</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <!-- The hx-trigger gates polling on the user NOT having an active
        text selection, so highlight-and-copy a URL out of a table cell
@@ -1189,26 +1261,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # newly-inserted node is not the one ``:target`` resolved to
         # at hash-change time). The visible symptom was the tab
         # snapping back to Streams within a second of every click.
-        tab_style = """
-<style>
-  nav.tabs { margin: 1rem 0 .25rem; border-bottom: 1px solid var(--pico-muted-border-color); }
-  nav.tabs ul { display: flex; gap: 0; padding: 0; margin: 0; list-style: none; }
-  nav.tabs li { margin: 0; }
-  nav.tabs a {
-    display: inline-block; padding: .45rem .9rem; text-decoration: none;
-    color: var(--pico-muted-color); border-bottom: 2px solid transparent;
-    margin-bottom: -1px; font-size: .9rem;
-  }
-  nav.tabs a:hover { color: var(--pico-color); }
-  nav.tabs a.active-tab {
-    color: var(--pico-color);
-    border-bottom-color: var(--pico-primary, #0172ad);
-    font-weight: 600;
-  }
-  section.tab { display: none; padding-top: .75rem; }
-  section.tab.active-tab { display: block; }
-</style>
-"""
+        # The class hooks live in _head's <style> so this dash render
+        # can be swapped 1 Hz without re-declaring them.
 
         stream_rows = (
             "".join(
@@ -1220,12 +1274,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             </tr>"""
                 for s in streams
             )
-            or '<tr><td colspan="4"><em>No active streams.</em></td></tr>'
+            or '<tr><td colspan="4" class="text-center text-muted">'
+            "<em>No active streams.</em></td></tr>"
         )
 
         job_rows = (
             "".join(self._job_row(j) for j in jobs)
-            or '<tr><td colspan="4"><em>No downloads yet.</em></td></tr>'
+            or '<tr><td colspan="4" class="text-center text-muted">'
+            "<em>No downloads yet.</em></td></tr>"
         )
 
         miss_rows = (
@@ -1234,21 +1290,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 <td class="url">{html.escape(m["url"])}</td>
                 <td class="num">{m["count"]}</td>
                 <td><small>{html.escape(m["last_seen"])}</small></td>
-                <td>
+                <td class="d-flex gap-2 flex-wrap">
                   <form hx-post="/admin/fetch" hx-target="#dash"
-                        hx-swap="innerHTML" hx-indicator="#spin">
+                        hx-swap="innerHTML" hx-indicator="#spin" class="m-0">
                     <input type="hidden" name="url" value="{html.escape(m["url"], quote=True)}">
-                    <button type="submit">Download</button>
+                    <button class="btn btn-sm btn-primary" type="submit">Download</button>
                   </form>
-                  <form hx-post="/admin/dismiss" hx-target="#dash" hx-swap="innerHTML">
+                  <form hx-post="/admin/dismiss" hx-target="#dash" hx-swap="innerHTML" class="m-0">
                     <input type="hidden" name="key" value="{html.escape(m["key"], quote=True)}">
-                    <button type="submit" class="secondary outline">Dismiss</button>
+                    <button class="btn btn-sm btn-outline-secondary" type="submit"
+                      >Dismiss</button>
                   </form>
                 </td>
             </tr>"""
                 for m in misses
             )
-            or '<tr><td colspan="4"><em>No misses recorded.</em></td></tr>'
+            or '<tr><td colspan="4" class="text-center text-muted">'
+            "<em>No misses recorded.</em></td></tr>"
         )
 
         # Build the per-row /b/ serve URL once; the cell wraps the
@@ -1274,19 +1332,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 <td>{human_size(b["size"])}</td>
                 <td class="num">{b["hits"]}</td>
                 <td class="num">{b["misses"]}</td>
-                <td class="mono">{html.escape(b["sha256"][:12])}…</td>
+                <td class="mono">{html.escape(b["sha256"][:12])}...</td>
                 <td><small>{html.escape(b["fetched_at"])}</small></td>
                 <td>
                   <form hx-post="/admin/delete" hx-target="#dash" hx-swap="innerHTML"
-                        hx-confirm="Delete this cached artifact?">
+                        hx-confirm="Delete this cached artifact?" class="m-0">
                     <input type="hidden" name="key" value="{html.escape(b["key"], quote=True)}">
-                    <button type="submit" class="secondary outline">Delete</button>
+                    <button class="btn btn-sm btn-outline-danger" type="submit"
+                      >Delete</button>
                   </form>
                 </td>
             </tr>"""
                 for b in blobs
             )
-            or '<tr><td colspan="7"><em>Cache is empty.</em></td></tr>'
+            or '<tr><td colspan="7" class="text-center text-muted">'
+            "<em>Cache is empty.</em></td></tr>"
         )
 
         # Per-tab counts let the operator see at a glance whether each
@@ -1295,59 +1355,63 @@ class Handler(http.server.BaseHTTPRequestHandler):
         njobs = len(jobs)
 
         return f"""
-  <p><small>{nblobs} cached ({used}){full} &middot; {nmisses} pending miss(es)</small></p>
-{tab_style}
-  <nav class="tabs"><ul>
-    <li><a href="#tab-cached" class="{_active("tab-cached").lstrip()}"
-       >Cached ({nblobs})</a></li>
-    <li><a href="#tab-streams" class="{_active("tab-streams").lstrip()}"
-       >Streams ({nstreams})</a></li>
-    <li><a href="#tab-downloads" class="{_active("tab-downloads").lstrip()}"
-       >Downloads ({njobs})</a></li>
-    <li><a href="#tab-misses" class="{_active("tab-misses").lstrip()}"
-       >Misses ({nmisses})</a></li>
-  </ul></nav>
+  <p class="text-muted small mb-2">{nblobs} cached ({used}){full}
+    &middot; {nmisses} pending miss(es)</p>
+  <nav class="tabs border-bottom mb-2">
+    <ul class="nav">
+      <li class="nav-item"><a class="nav-link {_active("tab-cached").lstrip()}"
+        href="#tab-cached">Cached ({nblobs})</a></li>
+      <li class="nav-item"><a class="nav-link {_active("tab-streams").lstrip()}"
+        href="#tab-streams">Streams ({nstreams})</a></li>
+      <li class="nav-item"><a class="nav-link {_active("tab-downloads").lstrip()}"
+        href="#tab-downloads">Downloads ({njobs})</a></li>
+      <li class="nav-item"><a class="nav-link {_active("tab-misses").lstrip()}"
+        href="#tab-misses">Misses ({nmisses})</a></li>
+    </ul>
+  </nav>
 
   <section id="tab-cached" class="tab{_active("tab-cached")}">
-    <figure><table class="striped">
-      <thead><tr>
+    <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
+      <thead class="table-light"><tr>
         <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
         <th>SHA-256</th><th>Fetched</th><th>Action</th>
       </tr></thead>
       <tbody>{blob_rows}</tbody>
-    </table></figure>
+    </table></div>
   </section>
 
   <section id="tab-streams" class="tab{_active("tab-streams")}">
-    <figure><table class="striped">
-      <thead><tr>
+    <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
+      <thead class="table-light"><tr>
         <th>URL</th><th>Client</th><th>Progress</th><th>Age</th>
       </tr></thead>
       <tbody>{stream_rows}</tbody>
-    </table></figure>
+    </table></div>
   </section>
 
   <section id="tab-downloads" class="tab{_active("tab-downloads")}">
-    <div class="row">
-      <small>Auto-fetch workers feeding the cache.</small>
-      <form hx-post="/admin/clear" hx-target="#dash" hx-swap="innerHTML" style="margin:0">
-        <button type="submit" class="secondary outline" style="width:auto;padding:.2rem .7rem">
-          Clear finished</button>
+    <div class="d-flex align-items-center justify-content-between mb-2">
+      <small class="text-muted">Auto-fetch workers feeding the cache.</small>
+      <form hx-post="/admin/clear" hx-target="#dash" hx-swap="innerHTML" class="m-0">
+        <button class="btn btn-sm btn-outline-secondary" type="submit"
+          >Clear finished</button>
       </form>
     </div>
-    <figure><table class="striped">
-      <thead><tr><th>Artifact</th><th>Progress</th><th>Status</th><th></th></tr></thead>
+    <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
+      <thead class="table-light"><tr>
+        <th>Artifact</th><th>Progress</th><th>Status</th><th></th>
+      </tr></thead>
       <tbody>{job_rows}</tbody>
-    </table></figure>
+    </table></div>
   </section>
 
   <section id="tab-misses" class="tab{_active("tab-misses")}">
-    <figure><table class="striped">
-      <thead><tr>
+    <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
+      <thead class="table-light"><tr>
         <th>URL</th><th class="num">Misses</th><th>Last seen</th><th>Action</th>
       </tr></thead>
       <tbody>{miss_rows}</tbody>
-    </table></figure>
+    </table></div>
   </section>"""
 
     def _stream_progress_cell(self, s: Stream) -> str:
@@ -1385,11 +1449,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cancel = ""
         if j.status in PENDING_STATES:
             cancel = (
-                '<form hx-post="/admin/cancel" hx-target="#dash" hx-swap="innerHTML">'
+                '<form hx-post="/admin/cancel" hx-target="#dash" hx-swap="innerHTML" class="m-0">'
                 f'<input type="hidden" name="id" value="{j.id}">'
-                '<button type="submit" class="secondary outline">Cancel</button></form>'
+                '<button class="btn btn-sm btn-outline-secondary" type="submit"'
+                ">Cancel</button></form>"
             )
-        color = self.STATUS_COLORS.get(j.status, "#888")
+        color = self.STATUS_COLORS.get(j.status, "var(--bs-secondary)")
         return f"""<tr>
             <td class="url" title="{html.escape(j.url, quote=True)}">{html.escape(name)}</td>
             <td>{prog}</td>
