@@ -188,9 +188,10 @@ class CatalogState:
     other render reads whatever is currently in memory.
 
     The raw TOML bytes are persisted to ``<data_dir>/catalog.toml``
-    so a restart doesn't wipe the last known good catalog and the
-    same file can be re-served verbatim to consumers on a future
-    ``GET /catalog.toml`` route.
+    so a restart doesn't wipe the last known good catalog. There is
+    no HTTP route that serves the file back verbatim; consumers
+    resolve entries by name through the dashboard or by reading
+    ``entries`` in-process.
 
     ``env_url`` records the value pinned via ``$WITHCACHE_CATALOG_URL``
     (empty if unset). The operator can override the effective URL at
