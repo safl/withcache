@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import base64
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from withcache import _shim, client, curlwithcache, server, wgetwithcache
@@ -1086,6 +1087,179 @@ class TestMultiPageNavigation(unittest.TestCase):
         self.assertIn("<table", body)
         self.assertNotIn("<html", body)
         self.assertNotIn("navbar-brand", body)
+
+
+# --------------------------------------------------------------------------
+# /admin/catalog_* -- the four operator-facing catalog control endpoints
+# --------------------------------------------------------------------------
+class _CatalogOrigin(http.server.BaseHTTPRequestHandler):
+    """Serves a fixed valid catalog.toml to catalog_refresh tests."""
+
+    PAYLOAD = (
+        b'[[images]]\nname = "demo"\nsrc = "https://example/demo.img.zst"\n'
+        b'format = "img.zst"\n\n'
+        b'[[images]]\nname = "other"\nsrc = "https://example/other.img.zst"\n'
+    )
+
+    def do_GET(self):
+        if self.path.endswith("/broken.toml"):
+            self.send_response(200)
+            self.send_header("Content-Length", "10")
+            self.end_headers()
+            self.wfile.write(b"not a toml")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/toml")
+        self.send_header("Content-Length", str(len(self.PAYLOAD)))
+        self.end_headers()
+        self.wfile.write(self.PAYLOAD)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestCatalogAdminEndpoints(unittest.TestCase):
+    """Cover the four catalog-admin endpoints
+    (/admin/catalog_refresh, /admin/catalog_set_url,
+    /admin/catalog_add_oras, /admin/catalog_delete_entry).
+
+    Only the shape assertions (form present + subnav layout) were
+    covered before; the wire behaviour -- POST validates, updates
+    state, and 303s back to the Catalog page -- had zero coverage.
+    """
+
+    def setUp(self):
+        self.origin = socketserver.TCPServer(("127.0.0.1", 0), _CatalogOrigin)
+        threading.Thread(target=self.origin.serve_forever, daemon=True).start()
+        origin_port = self.origin.server_address[1]
+        self.catalog_url = f"http://127.0.0.1:{origin_port}/catalog.toml"
+        self.httpd, self.store = _start_withcache()
+        # Re-point the catalog at the local origin so /admin/catalog_refresh
+        # hits something predictable.
+        self.httpd.catalog.url = self.catalog_url
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.origin.shutdown()
+        self.origin.server_close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def _post(self, path, form):
+        body = urllib.parse.urlencode(form).encode()
+        req = urllib.request.Request(
+            self.base + path,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        return urllib.request.urlopen(req)
+
+    def test_catalog_refresh_populates_entries(self):
+        self.assertEqual(self.httpd.catalog.entries, [])
+        with self._post("/admin/catalog_refresh", {}) as r:
+            self.assertEqual(r.status, 200)
+        names = [e["name"] for e in self.httpd.catalog.entries]
+        self.assertEqual(names, ["demo", "other"])
+        self.assertEqual(self.httpd.catalog.last_error, "")
+
+    def test_catalog_refresh_bad_toml_keeps_previous_entries(self):
+        # Seed the catalog with a known good entry, then re-point at
+        # a broken TOML endpoint and refresh; entries must survive.
+        self.httpd.catalog.entries = [{"name": "keeper", "src": "https://x/y"}]
+        origin_port = self.origin.server_address[1]
+        self.httpd.catalog.url = f"http://127.0.0.1:{origin_port}/broken.toml"
+        with self._post("/admin/catalog_refresh", {}) as r:
+            self.assertEqual(r.status, 200)
+        names = [e["name"] for e in self.httpd.catalog.entries]
+        self.assertEqual(names, ["keeper"])
+        self.assertTrue(self.httpd.catalog.last_error)
+
+    def test_catalog_set_url_persists_override_and_fetches(self):
+        # No env pin, no persist path -> the URL update takes effect
+        # in-process and an immediate fetch fires.
+        with self._post("/admin/catalog_set_url", {"url": self.catalog_url}) as r:
+            self.assertEqual(r.status, 200)
+        self.assertEqual(self.httpd.catalog.url, self.catalog_url)
+        # fetch_now already ran -> entries populated.
+        self.assertEqual([e["name"] for e in self.httpd.catalog.entries], ["demo", "other"])
+
+    def test_catalog_set_url_rejects_empty(self):
+        with self._post("/admin/catalog_set_url", {"url": "  "}) as r:
+            self.assertEqual(r.status, 200)
+        self.assertIn("empty", self.httpd.catalog.last_error)
+
+    def test_catalog_set_url_rejects_non_http_scheme(self):
+        with self._post("/admin/catalog_set_url", {"url": "ftp://x/y"}) as r:
+            self.assertEqual(r.status, 200)
+        self.assertIn("http", self.httpd.catalog.last_error)
+
+    def test_catalog_set_url_rejects_when_env_pinned(self):
+        self.httpd.catalog.env_url = "https://env-pinned/catalog.toml"
+        pinned_url = self.httpd.catalog.url
+        override_attempt = "https://different/catalog.toml"
+        with self._post("/admin/catalog_set_url", {"url": override_attempt}) as r:
+            self.assertEqual(r.status, 200)
+        self.assertIn("pinned", self.httpd.catalog.last_error)
+        # URL was not overridden -- stays at whatever it was before.
+        self.assertEqual(self.httpd.catalog.url, pinned_url)
+
+    def test_catalog_add_oras_rejects_non_oras_url(self):
+        with self._post("/admin/catalog_add_oras", {"url": "https://example/x"}) as r:
+            self.assertEqual(r.status, 200)
+        self.assertIn("oras://", self.httpd.catalog.last_error)
+        self.assertEqual(self.httpd.catalog.entries, [])
+
+    def test_catalog_add_oras_registers_entry_even_when_layer_probe_fails(self):
+        # A well-formed oras URL that will fail the layer-probe fetch
+        # (unreachable registry). The entry still lands per the
+        # add_oras_entry contract; last_info records the reason.
+        oras_url = "oras://127.0.0.1:1/safl/nosi/demo:v1"
+        with self._post("/admin/catalog_add_oras", {"url": oras_url}) as r:
+            self.assertEqual(r.status, 200)
+        entries = self.httpd.catalog.entries
+        self.assertEqual(len(entries), 1, f"expected 1 entry, got {entries!r}")
+        self.assertEqual(entries[0]["src"], oras_url)
+        self.assertEqual(self.httpd.catalog.last_error, "")
+
+    def test_catalog_delete_entry_removes_matching_row(self):
+        self.httpd.catalog.entries = [
+            {"name": "a", "src": "https://x/a"},
+            {"name": "b", "src": "https://x/b"},
+        ]
+        with self._post("/admin/catalog_delete_entry", {"name": "a"}) as r:
+            self.assertEqual(r.status, 200)
+        self.assertEqual([e["name"] for e in self.httpd.catalog.entries], ["b"])
+
+    def test_catalog_delete_entry_unknown_name_is_reported(self):
+        self.httpd.catalog.entries = [{"name": "a", "src": "https://x/a"}]
+        with self._post("/admin/catalog_delete_entry", {"name": "ghost"}) as r:
+            self.assertEqual(r.status, 200)
+        self.assertIn("ghost", self.httpd.catalog.last_error)
+
+    def test_admin_endpoints_require_auth_when_password_set(self):
+        # Fresh httpd with auth enabled.
+        httpd2, _ = _start_withcache()
+        httpd2.auth = server.Auth(b"k", "letmein")
+        base = f"http://127.0.0.1:{httpd2.server_address[1]}"
+        for path in (
+            "/admin/catalog_refresh",
+            "/admin/catalog_set_url",
+            "/admin/catalog_add_oras",
+            "/admin/catalog_delete_entry",
+        ):
+            with self.subTest(path=path):
+                req = urllib.request.Request(
+                    base + path,
+                    data=b"",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req)
+                self.assertEqual(cm.exception.code, 401)
+        httpd2.shutdown()
+        httpd2.server_close()
 
 
 if __name__ == "__main__":
