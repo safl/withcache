@@ -1,7 +1,7 @@
 # withcache — common tasks (and the home of the CI logic: the GitHub workflows
 # call these targets, so everything CI does is reproducible locally).
 # Run `make` for the list. Override vars on the CLI, e.g.
-#   make serve PORT=8080            make bump VERSION=0.2.0
+#   make serve PORT=8081            make bump VERSION=0.2.0
 #   make wheel-one ZTARGET=x86_64-linux-musl WTAG=py3-none-musllinux_1_2_x86_64
 PYTHON    ?= python3
 RUFF      ?= ruff
