@@ -643,6 +643,14 @@ def _start_withcache(auto_fetch=False):
     httpd.mgr = server.DownloadManager(store, workers=1)
     httpd.auto_fetch = auto_fetch
     httpd.streams = server.StreamRegistry()
+    # Empty catalog with a bogus URL so the tab renders "click Refresh
+    # above to fetch the catalog manifest" instead of firing a real
+    # HTTP call. Tests that specifically exercise the catalog code
+    # can override this attribute after the helper returns.
+    httpd.catalog = server.CatalogState(
+        url="http://localhost/catalog.toml",
+        persist_path=os.path.join(store.data_dir, "catalog.toml"),
+    )
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, store
 
