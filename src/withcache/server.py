@@ -293,43 +293,64 @@ class CatalogState:
                 return False, str(e)
         return True, f"catalog url set to {candidate}"
 
-    def replace_from_bytes(self, raw: bytes, *, source_label: str) -> tuple[bool, str]:
-        """Validate + persist an operator-supplied ``catalog.toml``
-        payload (from an upload). On success the in-memory ``entries``
-        are refreshed and ``last_info`` records the source. On
-        validation failure nothing on disk is touched."""
+    def add_oras_entry(self, oras_url: str) -> tuple[bool, str]:
+        """Append a single ``[[images]]`` row derived from an ``oras://``
+        reference. Parses the tag to derive a ``name`` (the last path
+        component + tag), fetches the manifest to pick the image layer's
+        ``org.opencontainers.image.title`` annotation for ``format``, and
+        extracts an ``arch`` hint from the tag suffix when present
+        (``…-x86_64`` / ``…-arm64``). Best-effort: parse or fetch
+        failures return an error tuple and record ``last_error``."""
+        candidate = oras_url.strip()
+        if not candidate.startswith("oras://"):
+            self.last_error = "expected oras:// URL"
+            return False, self.last_error
         try:
-            parsed = tomllib.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-            return False, f"not a valid TOML file: {e}"
-        entries = list(parsed.get("images") or [])
-        with self._lock:
-            try:
-                self._persist_bytes(raw)
-            except OSError as e:
-                return False, str(e)
-            self.entries = entries
-            self.fetched_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            self.last_error = ""
-            self.last_info = f"loaded {len(entries)} entries from {source_label}"
-        return True, self.last_info
-
-    def add_entry(self, entry: dict[str, Any]) -> tuple[bool, str]:
-        """Append a single ``[[images]]`` row to the persisted catalog
-        and refresh the in-memory list. ``entry`` must have at least
-        ``name`` and ``src``. Duplicate ``name`` replaces the existing
-        row (matches how ``bty-web``'s catalog-import handled dupes)."""
-        name = str(entry.get("name") or "").strip()
-        src = str(entry.get("src") or "").strip()
-        if not name:
-            return False, "name is required"
-        if not src:
-            return False, "src is required"
-        clean: dict[str, Any] = {"name": name, "src": src}
-        for key in ("format", "arch", "sha256"):
-            val = entry.get(key)
-            if isinstance(val, str) and val.strip():
-                clean[key] = val.strip()
+            ref = oras.parse_ref(candidate)
+        except oras.OrasError as e:
+            self.last_error = f"parse failed: {e}"
+            return False, self.last_error
+        # Derive a display name from the repo tail + tag / digest.
+        repo_tail = ref.repository.rsplit("/", 1)[-1]
+        version = ref.tag or (ref.digest or "").split(":", 1)[-1][:12]
+        name = f"{repo_tail}-{version}" if version else repo_tail
+        # Best-effort layer fetch for format + size. Failures still
+        # register the entry (the ORAS URL alone is enough for
+        # downstream consumers to resolve at flash time).
+        fmt = ""
+        size_bytes: int | None = None
+        try:
+            resolved = oras.resolve_ref(ref)
+            size_bytes = resolved.size
+            if resolved.title:
+                # nosi layer titles look like "debian-13-headless.img.zst".
+                # Strip the last two dot components as ``format`` when the
+                # tail matches a known compressor suffix; else take the
+                # single extension.
+                title = resolved.title
+                for suffix in (".img.zst", ".img.gz", ".img.xz", ".img", ".iso"):
+                    if title.endswith(suffix):
+                        fmt = suffix.lstrip(".")
+                        break
+        except (oras.OrasError, OSError) as e:
+            # Register the entry anyway; note the reason as info so
+            # the operator sees it but the row still lands.
+            self.last_info = f"registered {candidate} (layer probe failed: {e})"
+        # Arch hint from tag suffix; drop the trailing token when it
+        # matches a known arch so ``name`` isn't ``foo-x86_64-x86_64``.
+        arch = ""
+        known_archs = ("x86_64", "amd64", "arm64", "aarch64", "riscv64")
+        for a in known_archs:
+            if candidate.endswith(f"-{a}") or candidate.endswith(f":{a}"):
+                arch = a
+                break
+        clean: dict[str, Any] = {"name": name, "src": candidate}
+        if fmt:
+            clean["format"] = fmt
+        if arch:
+            clean["arch"] = arch
+        if size_bytes is not None:
+            clean["size_bytes"] = size_bytes
         with self._lock:
             new_entries = [e for e in self.entries if str(e.get("name") or "") != name]
             new_entries.append(clean)
@@ -337,10 +358,12 @@ class CatalogState:
             try:
                 self._persist_bytes(raw)
             except OSError as e:
+                self.last_error = str(e)
                 return False, str(e)
             self.entries = new_entries
             self.last_error = ""
-            self.last_info = f"added entry: {name}"
+            if not self.last_info.startswith("registered "):
+                self.last_info = f"added oras entry: {name}"
         return True, self.last_info
 
     def delete_entry(self, name: str) -> tuple[bool, str]:
@@ -977,37 +1000,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # quieter, single-line
         print(f"{self.address_string()} - {format % args}", flush=True)
 
+    # Multi-page navigation matching bty's shape: five top-level pages,
+    # one nav-btn each in the dark navbar. Fragment routes (``_fragment``)
+    # power the per-page 1 Hz htmx auto-refresh so only the table body
+    # swaps under the operator's cursor.
+    NAV_ITEMS: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        ("cached", "Cached", "bi-hdd-stack"),
+        ("streams", "Streams", "bi-arrow-repeat"),
+        ("downloads", "Downloads", "bi-cloud-download"),
+        ("misses", "Misses", "bi-question-circle"),
+        ("catalog", "Catalog", "bi-collection"),
+    )
+    _NAV_KEYS: ClassVar[frozenset[str]] = frozenset(k for k, _label, _icon in NAV_ITEMS)
+
     # -- routing -----------------------------------------------------------
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == "/blob" or parsed.path.startswith("/b/"):
             self.handle_blob(parsed, head_only=False)
-        elif parsed.path == "/healthz":
+            return
+        if parsed.path == "/healthz":
             self.send_text(200, "ok\n")
-        elif parsed.path.startswith("/static/"):
+            return
+        if parsed.path.startswith("/static/"):
             self.serve_static(parsed)
-        elif parsed.path == "/ui/login":
+            return
+        if parsed.path == "/ui/login":
             self.handle_login_form()
-        elif parsed.path == "/admin/dash":
-            if not self.is_authed():
-                self.send_text(401, "login required\n")
-            else:
-                # The browser sends the current URL hash (the active
-                # tab id) via the ``X-Active-Tab`` request header on
-                # every 1 Hz refresh. Server bakes the matching
-                # ``.active-tab`` class directly into the rendered
-                # HTML so the htmx innerHTML swap doesn't visibly
-                # blink while the post-swap JS would otherwise
-                # re-apply the class. See render_dash().
-                active = (self.headers.get("X-Active-Tab") or "").strip()
-                self.send_html(200, self.render_dash(active_tab=active))
-        elif parsed.path == "/":
+            return
+        if parsed.path == "/":
             if not self.is_authed():
                 self.redirect("/ui/login")
             else:
-                self.send_html(200, self.render_page())
-        else:
-            self.send_text(404, "not found\n")
+                self.redirect("/ui/cached")
+            return
+        # /ui/<page> (full page) or /ui/<page>_fragment (htmx body swap).
+        if parsed.path.startswith("/ui/"):
+            tail = parsed.path[len("/ui/") :]
+            fragment = tail.endswith("_fragment")
+            key = tail[: -len("_fragment")] if fragment else tail
+            if key in self._NAV_KEYS:
+                if not self.is_authed():
+                    if fragment:
+                        self.send_text(401, "login required\n")
+                    else:
+                        self.redirect("/ui/login")
+                    return
+                self._render_page(key, fragment=fragment)
+                return
+        self.send_text(404, "not found\n")
 
     def do_HEAD(self):
         parsed = urllib.parse.urlsplit(self.path)
@@ -1024,23 +1065,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         "/admin/clear",
         "/admin/catalog_refresh",
         "/admin/catalog_set_url",
-        "/admin/catalog_upload",
-        "/admin/catalog_add_entry",
+        "/admin/catalog_add_oras",
         "/admin/catalog_delete_entry",
     )
 
+    # Map each POST admin action to the /ui/<page> the operator was
+    # on so ``respond_admin`` sends non-htmx callers back to a sensible
+    # landing after the action.
+    _ADMIN_HOME: ClassVar[dict[str, str]] = {
+        "/admin/fetch": "/ui/downloads",
+        "/admin/dismiss": "/ui/misses",
+        "/admin/delete": "/ui/cached",
+        "/admin/cancel": "/ui/downloads",
+        "/admin/clear": "/ui/downloads",
+        "/admin/catalog_refresh": "/ui/catalog",
+        "/admin/catalog_set_url": "/ui/catalog",
+        "/admin/catalog_add_oras": "/ui/catalog",
+        "/admin/catalog_delete_entry": "/ui/catalog",
+    }
+
     def do_POST(self):
         parsed = urllib.parse.urlsplit(self.path)
-        # /admin/catalog_upload reads its own body (multipart); everything
-        # else uses the form parser. Don't try to url-decode multipart
-        # bytes.
-        if parsed.path == "/admin/catalog_upload":
-            if not self.is_authed():
-                self.send_text(401, "login required\n")
-                return
-            self._handle_catalog_upload()
-            self.respond_admin()
-            return
         form = self.read_form()
         if parsed.path == "/ui/login":
             self.handle_login_submit(form)
@@ -1074,22 +1119,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.catalog.fetch_now()
                 else:
                     self.catalog.last_error = msg
-            elif parsed.path == "/admin/catalog_add_entry":
-                entry = {
-                    "name": form.get("name", ""),
-                    "src": form.get("src", ""),
-                    "format": form.get("format", ""),
-                    "arch": form.get("arch", ""),
-                    "sha256": form.get("sha256", ""),
-                }
-                ok, msg = self.catalog.add_entry(entry)
-                if not ok:
-                    self.catalog.last_error = msg
+            elif parsed.path == "/admin/catalog_add_oras":
+                self.catalog.add_oras_entry(form.get("url", ""))
             elif parsed.path == "/admin/catalog_delete_entry":
                 ok, msg = self.catalog.delete_entry(form.get("name", ""))
                 if not ok:
                     self.catalog.last_error = msg
-            self.respond_admin()
+            self.respond_admin(parsed.path)
         else:
             self.send_text(404, "not found\n")
 
@@ -1142,30 +1178,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
-    def respond_admin(self):
-        """HTMX actions get the refreshed dashboard fragment; plain form posts
-        (no JS) fall back to a full-page redirect."""
+    def respond_admin(self, endpoint: str):
+        """HTMX actions get the refreshed per-page fragment; plain form
+        posts (no JS) fall back to a full-page redirect at the page
+        that hosts this action."""
+        home = self._ADMIN_HOME.get(endpoint, "/ui/cached")
         if self.is_htmx():
-            self.send_html(200, self.render_dash())
+            # The htmx form set ``hx-target`` to the page's fragment
+            # container (``#cached-fragment`` etc.) and ``hx-swap`` to
+            # ``innerHTML``; render just the inner rows.
+            key = home[len("/ui/") :] if home.startswith("/ui/") else "cached"
+            self.send_html(200, self._render_fragment_only(key))
         else:
-            self.redirect("/")
+            self.redirect(home)
 
     def handle_login_form(self):
         if self.is_authed():
-            self.redirect("/")
+            self.redirect("/ui/cached")
             return
         self.send_html(200, self.render_login())
 
     def handle_login_submit(self, form):
         if not self.auth.enabled:
-            self.redirect("/")
+            self.redirect("/ui/cached")
             return
         if self.auth.check_password(form.get("password", "")):
             cookie = (
                 f"{Auth.COOKIE}={self.auth.make_token()}; HttpOnly; "
                 f"SameSite=Lax; Path=/; Max-Age={Auth.MAX_AGE}"
             )
-            self.redirect("/", set_cookie=cookie)
+            self.redirect("/ui/cached", set_cookie=cookie)
             print(f"{self.address_string()} - login succeeded", flush=True)
         else:
             print(f"{self.address_string()} - login failed", flush=True)
@@ -1270,55 +1312,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length).decode("utf-8") if length else ""
         return {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
-
-    def _handle_catalog_upload(self) -> None:
-        """Parse a multipart/form-data body with a single ``catalog``
-        file part and forward the raw bytes to
-        ``CatalogState.replace_from_bytes``. Stdlib-only: uses
-        ``email.parser.BytesParser`` to walk the parts (avoids the
-        ``cgi`` module which is slated for removal). On success or
-        failure the outcome is recorded in ``last_info`` /
-        ``last_error`` so ``respond_admin`` renders it inline."""
-        content_type = self.headers.get("Content-Type", "") or ""
-        if not content_type.startswith("multipart/"):
-            self.catalog.last_error = "expected multipart/form-data"
-            return
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        if length <= 0:
-            self.catalog.last_error = "empty upload"
-            return
-        body = self.rfile.read(length)
-        # BytesParser needs a full "MIME message" header line so it
-        # knows the Content-Type; prepend it verbatim from the request.
-        prelude = f"MIME-Version: 1.0\r\nContent-Type: {content_type}\r\n\r\n".encode()
-        try:
-            import email.parser
-            import email.policy
-
-            msg = email.parser.BytesParser(policy=email.policy.default).parsebytes(prelude + body)
-        except Exception as e:  # noqa: BLE001 -- any parse error is a bad upload
-            self.catalog.last_error = f"multipart parse failed: {e}"
-            return
-        if not msg.is_multipart():
-            self.catalog.last_error = "no multipart parts found"
-            return
-        payload_bytes: bytes | None = None
-        filename = "upload"
-        for part in msg.iter_parts():
-            disp = part.get("Content-Disposition", "") or ""
-            if 'name="catalog"' not in disp:
-                continue
-            payload_bytes = part.get_payload(decode=True)
-            candidate_filename = part.get_filename()
-            if candidate_filename:
-                filename = candidate_filename
-            break
-        if not payload_bytes:
-            self.catalog.last_error = "upload missing 'catalog' file part"
-            return
-        ok, msg_text = self.catalog.replace_from_bytes(payload_bytes, source_label=filename)
-        if not ok:
-            self.catalog.last_error = msg_text
 
     def send_text(self, code: int, text: str):
         data = text.encode("utf-8")
@@ -1589,10 +1582,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     color: #fff;
     background-color: rgba(255, 255, 255, 0.10);
   }}
-  .subnav-strip .nav-pills .nav-link.active-tab {{
-    color: #fff;
-    background-color: {primary};
-  }}
   .subnav-strip .text-muted {{
     color: rgba(255, 255, 255, 0.55) !important;
   }}
@@ -1613,12 +1602,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
   .num {{ text-align: right; }}
   .mono {{ font-family: var(--bs-font-monospace); font-size: .85em; }}
   #spin {{ width: 7rem; height: .5rem; margin: 0; }}
-  /* Tab content panels: shown only when the section carries
-     ``.active-tab``. Same hook the previous nav-tabs code used;
-     unchanged so the existing htmx post-swap script keeps
-     working. */
-  section.tab {{ display: none; padding-top: .25rem; }}
-  section.tab.active-tab {{ display: block; }}
 </style>
 </head>"""
 
@@ -1657,13 +1640,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
   </div>
 </main></body></html>"""
 
-    def render_page(self) -> str:
-        """The authenticated shell: sticky-header wrapping the accent
-        strip, the dark navbar (brand pill + version + user-bar), and
-        the subnav strip carrying the tab pills. Then main.container
-        with the "Add from URI" card and the htmx-swapped #dash
-        region. Same chrome bty uses; only ``--bs-primary`` differs."""
-        user_bar = (
+    # ---- Multi-page shell ------------------------------------------------
+    def _user_bar_html(self) -> str:
+        if not self.auth.enabled:
+            return ""
+        return (
             '<div class="user-bar mt-2 mt-md-0" title="Operator session">'
             '<span class="user-bar-name">'
             '<i class="bi bi-person-circle"></i><code>operator</code>'
@@ -1674,219 +1655,153 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '<i class="bi bi-box-arrow-right"></i>'
             "</button></form>"
             "</div>"
-            if self.auth.enabled
-            else ""
         )
-        return f"""{self._head("withcache cache-host")}
+
+    def _nav_btns_html(self, active_key: str) -> str:
+        """Render the five middle nav-btns in the dark navbar with
+        their live counts and icons. One carries ``.active`` for the
+        current page."""
+        counts = self._nav_counts()
+        parts: list[str] = []
+        for key, label, icon in self.NAV_ITEMS:
+            n = counts.get(key, 0)
+            active = " active" if key == active_key else ""
+            parts.append(
+                f'<a class="nav-btn{active}" href="/ui/{key}">'
+                f'<i class="bi {icon}"></i>{label} ({n})'
+                "</a>"
+            )
+        return "".join(parts)
+
+    def _nav_counts(self) -> dict[str, int]:
+        nblobs, nmisses = self.store.counts()
+        return {
+            "cached": nblobs,
+            "streams": len(self.streams.snapshot()),
+            "downloads": len(self.mgr.list()),
+            "misses": nmisses,
+            "catalog": len(self.catalog.entries),
+        }
+
+    def _render_shell(
+        self,
+        title: str,
+        nav_active: str,
+        subnav_html: str,
+        body_html: str,
+    ) -> str:
+        return f"""{self._head(title)}
 <body class="bg-light">
-<!-- Sticky header: the accent strip, the main navbar, and the
-     sub-nav strip travel together and pin to the top so the tab
-     pills stay reachable while scrolling a long list. -->
 <div class="sticky-header">
 <div class="brand-accent"></div>
 <nav class="navbar navbar-expand-md bg-dark navbar-dark py-2">
     <div class="container">
-        <a class="navbar-brand fw-semibold brand-active" href="/">
+        <a class="navbar-brand fw-semibold" href="/ui/cached">
             <i class="bi bi-database brand-icon me-1"></i>WITHCACHE
         </a>
         <div class="d-flex flex-grow-1 align-items-center flex-wrap">
             <div class="me-auto d-flex flex-wrap">
-                <!-- withcache is a single-page dashboard: no middle
-                     nav-btns. me-auto pushes version + user-bar right. -->
+                {self._nav_btns_html(nav_active)}
             </div>
             <span class="navbar-version me-2">v{html.escape(__version__)}</span>
-            {user_bar}
+            {self._user_bar_html()}
         </div>
     </div>
 </nav>
-
-<!-- Sub-nav strip. Left side carries the five tab pills below the
-     main navbar; right side carries the page-level "Add from URI"
-     action (bty convention: page-level actions live in the subnav's
-     right-hand subnav-actions slot, not as a full-width card in
-     main). The tab pills are rendered STATIC here so labels don't
-     flicker on the 1 Hz htmx dashboard swap. Per-tab counts live
-     in the summary line inside the dash content and update on
-     every swap. -->
-<div class="subnav-strip">
-  <div class="container">
-    <ul class="nav nav-pills flex-nowrap flex-md-wrap m-0">
-      <li class="nav-item"><a class="nav-link" href="#tab-cached">Cached</a></li>
-      <li class="nav-item"><a class="nav-link" href="#tab-streams">Streams</a></li>
-      <li class="nav-item"><a class="nav-link" href="#tab-downloads">Downloads</a></li>
-      <li class="nav-item"><a class="nav-link" href="#tab-misses">Misses</a></li>
-      <li class="nav-item"><a class="nav-link" href="#tab-catalog">Catalog</a></li>
-    </ul>
-    <div class="subnav-actions ms-auto d-flex align-items-center gap-1">
-      <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML"
-            hx-indicator="#spin" hx-on::after-request="this.reset()"
-            class="m-0 d-flex align-items-center gap-1">
-        <input class="form-control form-control-sm" type="url" name="url"
-               style="width: 22rem;"
-               placeholder="https://origin/path/artifact.tar.gz" required>
-        <button class="btn btn-sm btn-primary" type="submit" title="Add from URI"
-                >Fetch</button>
-      </form>
-      <progress id="spin" class="htmx-indicator ms-1"
-                style="width:4rem;height:.4rem;"></progress>
-    </div>
-  </div>
-</div>
+{subnav_html}
 </div><!-- /.sticky-header -->
-
 <main class="container py-4">
-
-  <!-- The hx-trigger gates polling on the user NOT having an active
-       text selection, so highlight-and-copy a URL out of a table cell
-       isn't wiped by the 1 Hz refresh. hx-headers sends the current
-       URL hash (the active tab id) as X-Active-Tab on every refresh
-       so the server can bake .active-tab into the rendered HTML,
-       eliminating the visible flicker the post-swap JS-applied class
-       would otherwise cause when the new innerHTML lands. -->
-  <div id="dash" hx-get="/admin/dash"
-       hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
-       hx-swap="innerHTML"
-       hx-headers='js:{{"X-Active-Tab": (location.hash || "").replace(/^#/, "")}}'>
-    {self.render_dash(active_tab=(self.headers.get("X-Active-Tab") or "").strip())}
-  </div>
-
-  <!-- Tab activation: apply .active-tab to the section (inside
-       #dash) AND to the matching subnav pill (outside #dash) whose
-       id/hash matches the current URL hash. Runs on hashchange, on
-       click into a tab link, and on every htmx:afterSettle so the
-       class survives the 1 Hz innerHTML replacement of #dash.
-       Subnav pills live outside #dash so the JS-applied class on
-       them is not touched by the swap; sections inside #dash also
-       get the class baked server-side (via X-Active-Tab) so there
-       is no visible flicker between swap and JS re-apply. -->
-  <script>
-    (function () {{
-      function applyActiveTab() {{
-        var hash = (window.location.hash || '').replace(/^#/, '');
-        var sections = document.querySelectorAll('#dash section.tab');
-        if (!sections.length) return;
-        var ids = Array.prototype.map.call(sections, function (s) {{ return s.id; }});
-        if (ids.indexOf(hash) === -1) hash = ids[0];
-        sections.forEach(function (s) {{
-          s.classList.toggle('active-tab', s.id === hash);
-        }});
-        document.querySelectorAll('.subnav-strip .nav-pills .nav-link').forEach(function (a) {{
-          var target = (a.getAttribute('href') || '').replace(/^#/, '');
-          a.classList.toggle('active-tab', target === hash);
-        }});
-      }}
-      window.addEventListener('hashchange', applyActiveTab);
-      document.body.addEventListener('htmx:afterSettle', applyActiveTab);
-      document.addEventListener('click', function (ev) {{
-        var a = ev.target.closest && ev.target.closest('.subnav-strip .nav-pills .nav-link');
-        if (a) setTimeout(applyActiveTab, 0);
-      }});
-      applyActiveTab();
-    }})();
-  </script>
+{body_html}
 </main></body></html>"""
 
-    def render_dash(self, active_tab: str = "") -> str:
-        # Tab activation is baked into the rendered HTML so the htmx
-        # innerHTML swap doesn't strip `.active-tab` between the
-        # swap and the post-settle JS re-apply. The client sends
-        # the current hash via the ``X-Active-Tab`` header on each
-        # 1 Hz refresh (and on every operator click via the same
-        # script that watches hashchange). Unknown / empty value
-        # defaults to the first tab.
-        _TAB_IDS = ("tab-cached", "tab-streams", "tab-downloads", "tab-misses", "tab-catalog")
-        if active_tab not in _TAB_IDS:
-            active_tab = _TAB_IDS[0]
+    def _render_page(self, key: str, *, fragment: bool) -> None:
+        """Dispatch a full-page render or a fragment-only refresh for
+        the given nav key. Fragment mode is used by the per-page htmx
+        auto-refresh trigger (``hx-get=/ui/<key>_fragment`` on the
+        wrapping div) so only the table body swaps."""
+        if fragment:
+            self.send_html(200, self._render_fragment_only(key))
+            return
+        subnav, body = self._render_page_parts(key)
+        title = {
+            "cached": "withcache -- Cached",
+            "streams": "withcache -- Streams",
+            "downloads": "withcache -- Downloads",
+            "misses": "withcache -- Misses",
+            "catalog": "withcache -- Catalog",
+        }[key]
+        self.send_html(200, self._render_shell(title, key, subnav, body))
 
-        def _active(tab_id: str) -> str:
-            return " active-tab" if tab_id == active_tab else ""
+    def _render_page_parts(self, key: str) -> tuple[str, str]:
+        """Return ``(subnav_html, main_body_html)`` for the given page.
+        The main body embeds an ``hx-get=/ui/<key>_fragment`` wrapper
+        so the 1 Hz auto-refresh only swaps the inner rows."""
+        if key == "cached":
+            subnav = self._subnav("")
+            body = self._cached_body_html()
+        elif key == "streams":
+            subnav = self._subnav("")
+            body = self._streams_body_html()
+        elif key == "downloads":
+            subnav = self._downloads_subnav_html()
+            body = self._downloads_body_html()
+        elif key == "misses":
+            subnav = self._subnav("")
+            body = self._misses_body_html()
+        else:  # catalog
+            subnav = self._catalog_subnav_html()
+            body = self._catalog_body_html()
+        return subnav, body
 
-        nblobs, nmisses = self.store.counts()
-        jobs = self.mgr.list()
-        misses = self.store.list_misses()
+    def _render_fragment_only(self, key: str) -> str:
+        """The inner (auto-refresh) fragment for a page: just the
+        rows / cards that change under polling. Wrapping ``div`` lives
+        in the full page and stays static across swaps."""
+        if key == "cached":
+            return self._cached_fragment_html()
+        if key == "streams":
+            return self._streams_fragment_html()
+        if key == "downloads":
+            return self._downloads_fragment_html()
+        if key == "misses":
+            return self._misses_fragment_html()
+        return self._catalog_fragment_html()
+
+    def _subnav(self, right_html: str, *, left_html: str = "") -> str:
+        """Assemble the subnav strip from optional left / right slots.
+        Left slot defaults to empty; right slot goes into
+        ``.subnav-actions.ms-auto`` per bty convention."""
+        left = left_html
+        right = ""
+        if right_html:
+            right = (
+                '<div class="subnav-actions ms-auto d-flex '
+                f'align-items-center gap-1">{right_html}'
+                '<progress id="spin" class="htmx-indicator ms-1" '
+                'style="width:4rem;height:.4rem;"></progress></div>'
+            )
+        return f'<div class="subnav-strip"><div class="container">{left}{right}</div></div>'
+
+    # ---- Cached page -----------------------------------------------------
+    def _cached_body_html(self) -> str:
+        return f"""
+  <div id="cached-fragment"
+       hx-get="/ui/cached_fragment"
+       hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
+       hx-swap="innerHTML">
+    {self._cached_fragment_html()}
+  </div>"""
+
+    def _cached_fragment_html(self) -> str:
         blobs = self.store.list_blobs()
-        streams = self.streams.snapshot()
-        used = human_size(self.store.total_size())
-        if self.store.max_bytes:
-            used += f" / {human_size(self.store.max_bytes)}"
-        full = "" if self.store.has_capacity() else " &middot; <strong>cache full</strong>"
 
-        # Tabs are driven by an ``active-tab`` class applied to one
-        # ``section.tab`` (and matching ``nav.tabs a``). A tiny script
-        # at the bottom of the dash watches the URL hash, the htmx
-        # post-swap event, and click events on the tab links so the
-        # class survives every 1 Hz innerHTML replacement.
-        #
-        # An earlier pure-CSS attempt used ``:target`` + ``:has()``.
-        # That works on a static page, but when htmx swaps the
-        # ``#dash`` innerHTML each second the freshly-inserted
-        # ``section.tab`` elements do not always get re-matched by
-        # ``:target`` (the browser keeps the URL hash but the
-        # newly-inserted node is not the one ``:target`` resolved to
-        # at hash-change time). The visible symptom was the tab
-        # snapping back to Streams within a second of every click.
-        # The class hooks live in _head's <style> so this dash render
-        # can be swapped 1 Hz without re-declaring them.
-
-        stream_rows = (
-            "".join(
-                f"""<tr>
-                <td class="url">{html.escape(s.url)}</td>
-                <td class="mono"><small>{html.escape(s.client)}</small></td>
-                <td>{self._stream_progress_cell(s)}</td>
-                <td><small>{_age_human(s.started_at)}</small></td>
-            </tr>"""
-                for s in streams
-            )
-            or '<tr><td colspan="4" class="text-center text-muted">'
-            "<em>No active streams.</em></td></tr>"
-        )
-
-        job_rows = (
-            "".join(self._job_row(j) for j in jobs)
-            or '<tr><td colspan="4" class="text-center text-muted">'
-            "<em>No downloads yet.</em></td></tr>"
-        )
-
-        miss_rows = (
-            "".join(
-                f"""<tr>
-                <td class="url">{html.escape(m["url"])}</td>
-                <td class="num">{m["count"]}</td>
-                <td><small>{html.escape(m["last_seen"])}</small></td>
-                <td class="d-flex gap-2 flex-wrap">
-                  <form hx-post="/admin/fetch" hx-target="#dash"
-                        hx-swap="innerHTML" hx-indicator="#spin" class="m-0">
-                    <input type="hidden" name="url" value="{html.escape(m["url"], quote=True)}">
-                    <button class="btn btn-sm btn-primary" type="submit">Download</button>
-                  </form>
-                  <form hx-post="/admin/dismiss" hx-target="#dash" hx-swap="innerHTML" class="m-0">
-                    <input type="hidden" name="key" value="{html.escape(m["key"], quote=True)}">
-                    <button class="btn btn-sm btn-outline-secondary" type="submit"
-                      >Dismiss</button>
-                  </form>
-                </td>
-            </tr>"""
-                for m in misses
-            )
-            or '<tr><td colspan="4" class="text-center text-muted">'
-            "<em>No misses recorded.</em></td></tr>"
-        )
-
-        # Build the per-row /b/ serve URL once; the cell wraps the
-        # origin string in a link that GETs the cached bytes when
-        # the operator clicks. Same path-encoded form the shim
-        # generates so curl / wget / a browser save all end up
-        # writing the correct output filename.
         def _serve_url_for(row: sqlite3.Row) -> str:
             origin = row["url"]
             token = base64.urlsafe_b64encode(origin.encode("utf-8")).decode("ascii").rstrip("=")
-            # last path segment of the origin, fallback "download" so a
-            # URL ending in / still serves with a usable filename.
             name = urllib.parse.urlsplit(origin).path.rsplit("/", 1)[-1] or "download"
             return f"/b/{token}/{urllib.parse.quote(name)}"
 
-        blob_rows = (
+        rows = (
             "".join(
                 f"""<tr>
                 <td class="url">
@@ -1899,9 +1814,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 <td class="mono">{html.escape(b["sha256"][:12])}...</td>
                 <td><small>{html.escape(b["fetched_at"])}</small></td>
                 <td>
-                  <form hx-post="/admin/delete" hx-target="#dash" hx-swap="innerHTML"
+                  <form hx-post="/admin/delete" hx-target="#cached-fragment"
+                        hx-swap="innerHTML"
                         hx-confirm="Delete this cached artifact?" class="m-0">
-                    <input type="hidden" name="key" value="{html.escape(b["key"], quote=True)}">
+                    <input type="hidden" name="key"
+                           value="{html.escape(b["key"], quote=True)}">
                     <button class="btn btn-sm btn-outline-danger" type="submit"
                       >Delete</button>
                   </form>
@@ -1912,53 +1829,88 @@ class Handler(http.server.BaseHTTPRequestHandler):
             or '<tr><td colspan="7" class="text-center text-muted">'
             "<em>Cache is empty.</em></td></tr>"
         )
-
-        # Per-tab counts let the operator see at a glance whether each
-        # section is empty without flipping to it.
-        nstreams = len(streams)
-        njobs = len(jobs)
-
-        catalog_rows = self._catalog_rows()
-        ncatalog = len(self.catalog.entries)
-
-        # The per-tab count summary lives here (inside the htmx-swapped
-        # region) so it updates every second. Tab labels themselves
-        # live in the static sub-nav strip in ``render_page`` per bty
-        # convention -- labels are chrome, counts are content.
         return f"""
-  <p class="text-muted small mb-3">
-    <span class="badge bg-primary bg-opacity-10 text-primary me-1">{nblobs} cached ({used}){
-            full
-        }</span>
-    <span class="badge bg-secondary bg-opacity-10 text-secondary me-1">{nstreams} streams</span>
-    <span class="badge bg-secondary bg-opacity-10 text-secondary me-1">{njobs} downloads</span>
-    <span class="badge bg-secondary bg-opacity-10 text-secondary me-1">{nmisses} misses</span>
-    <span class="badge bg-secondary bg-opacity-10 text-secondary">{ncatalog} catalog</span>
-  </p>
-
-  <section id="tab-cached" class="tab{_active("tab-cached")}">
     <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
       <thead class="table-light"><tr>
         <th>URL</th><th>Size</th><th class="num">Hits</th><th class="num">Misses</th>
         <th>SHA-256</th><th>Fetched</th><th>Action</th>
       </tr></thead>
-      <tbody>{blob_rows}</tbody>
-    </table></div>
-  </section>
+      <tbody>{rows}</tbody>
+    </table></div>"""
 
-  <section id="tab-streams" class="tab{_active("tab-streams")}">
+    # ---- Streams page ----------------------------------------------------
+    def _streams_body_html(self) -> str:
+        return f"""
+  <div id="streams-fragment"
+       hx-get="/ui/streams_fragment"
+       hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
+       hx-swap="innerHTML">
+    {self._streams_fragment_html()}
+  </div>"""
+
+    def _streams_fragment_html(self) -> str:
+        streams = self.streams.snapshot()
+        rows = (
+            "".join(
+                f"""<tr>
+                <td class="url">{html.escape(s.url)}</td>
+                <td class="mono"><small>{html.escape(s.client)}</small></td>
+                <td>{self._stream_progress_cell(s)}</td>
+                <td><small>{_age_human(s.started_at)}</small></td>
+            </tr>"""
+                for s in streams
+            )
+            or '<tr><td colspan="4" class="text-center text-muted">'
+            "<em>No active streams.</em></td></tr>"
+        )
+        return f"""
     <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
       <thead class="table-light"><tr>
         <th>URL</th><th>Client</th><th>Progress</th><th>Age</th>
       </tr></thead>
-      <tbody>{stream_rows}</tbody>
-    </table></div>
-  </section>
+      <tbody>{rows}</tbody>
+    </table></div>"""
 
-  <section id="tab-downloads" class="tab{_active("tab-downloads")}">
+    # ---- Downloads page --------------------------------------------------
+    def _downloads_subnav_html(self) -> str:
+        """Downloads carries the Add-from-URI form in the subnav's
+        right slot -- this is the page that hosts the auto-fetch
+        workers those inputs feed."""
+        right = (
+            '<form hx-post="/admin/fetch" hx-target="#downloads-fragment" '
+            'hx-swap="innerHTML" hx-indicator="#spin" '
+            'hx-on::after-request="this.reset()" '
+            'class="m-0 d-flex align-items-center gap-1">'
+            '<input class="form-control form-control-sm" type="url" name="url" '
+            'style="width: 22rem;" '
+            'placeholder="https://origin/path/artifact.tar.gz" required>'
+            '<button class="btn btn-sm btn-primary" type="submit" title="Add from URI"'
+            ">Fetch</button>"
+            "</form>"
+        )
+        return self._subnav(right)
+
+    def _downloads_body_html(self) -> str:
+        return f"""
+  <div id="downloads-fragment"
+       hx-get="/ui/downloads_fragment"
+       hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
+       hx-swap="innerHTML">
+    {self._downloads_fragment_html()}
+  </div>"""
+
+    def _downloads_fragment_html(self) -> str:
+        jobs = self.mgr.list()
+        rows = (
+            "".join(self._job_row(j) for j in jobs)
+            or '<tr><td colspan="4" class="text-center text-muted">'
+            "<em>No downloads yet.</em></td></tr>"
+        )
+        return f"""
     <div class="d-flex align-items-center justify-content-between mb-2">
       <small class="text-muted">Auto-fetch workers feeding the cache.</small>
-      <form hx-post="/admin/clear" hx-target="#dash" hx-swap="innerHTML" class="m-0">
+      <form hx-post="/admin/clear" hx-target="#downloads-fragment" hx-swap="innerHTML"
+            class="m-0">
         <button class="btn btn-sm btn-outline-secondary" type="submit"
           >Clear finished</button>
       </form>
@@ -1967,43 +1919,144 @@ class Handler(http.server.BaseHTTPRequestHandler):
       <thead class="table-light"><tr>
         <th>Artifact</th><th>Progress</th><th>Status</th><th></th>
       </tr></thead>
-      <tbody>{job_rows}</tbody>
-    </table></div>
-  </section>
+      <tbody>{rows}</tbody>
+    </table></div>"""
 
-  <section id="tab-misses" class="tab{_active("tab-misses")}">
+    # ---- Misses page -----------------------------------------------------
+    def _misses_body_html(self) -> str:
+        return f"""
+  <div id="misses-fragment"
+       hx-get="/ui/misses_fragment"
+       hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
+       hx-swap="innerHTML">
+    {self._misses_fragment_html()}
+  </div>"""
+
+    def _misses_fragment_html(self) -> str:
+        misses = self.store.list_misses()
+        rows = (
+            "".join(
+                f"""<tr>
+                <td class="url">{html.escape(m["url"])}</td>
+                <td class="num">{m["count"]}</td>
+                <td><small>{html.escape(m["last_seen"])}</small></td>
+                <td class="d-flex gap-2 flex-wrap">
+                  <form hx-post="/admin/fetch" hx-target="#misses-fragment"
+                        hx-swap="innerHTML" hx-indicator="#spin" class="m-0">
+                    <input type="hidden" name="url"
+                           value="{html.escape(m["url"], quote=True)}">
+                    <button class="btn btn-sm btn-primary" type="submit">Download</button>
+                  </form>
+                  <form hx-post="/admin/dismiss" hx-target="#misses-fragment"
+                        hx-swap="innerHTML" class="m-0">
+                    <input type="hidden" name="key"
+                           value="{html.escape(m["key"], quote=True)}">
+                    <button class="btn btn-sm btn-outline-secondary" type="submit"
+                      >Dismiss</button>
+                  </form>
+                </td>
+            </tr>"""
+                for m in misses
+            )
+            or '<tr><td colspan="4" class="text-center text-muted">'
+            "<em>No misses recorded.</em></td></tr>"
+        )
+        return f"""
     <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
       <thead class="table-light"><tr>
         <th>URL</th><th class="num">Misses</th><th>Last seen</th><th>Action</th>
       </tr></thead>
-      <tbody>{miss_rows}</tbody>
-    </table></div>
-  </section>
+      <tbody>{rows}</tbody>
+    </table></div>"""
 
-  <section id="tab-catalog" class="tab{_active("tab-catalog")}">
-    {self._catalog_controls_html()}
+    # ---- Catalog page ----------------------------------------------------
+    def _catalog_subnav_html(self) -> str:
+        """Catalog subnav-actions right side: the Catalog URL form
+        (Set & fetch + Refresh) plus a small oras-only input that
+        appends a single {name, src, format?, arch?} entry."""
+        catalog = self.catalog
+        env_pinned = bool(catalog.env_url)
+        url_input_attrs = (
+            'disabled title="pinned by env WITHCACHE_CATALOG_URL"' if env_pinned else ""
+        )
+        env_hint = (
+            '<span class="badge bg-secondary bg-opacity-10 text-secondary ms-1"'
+            ' title="pinned by env">env</span>'
+            if env_pinned
+            else ""
+        )
+        right = f"""
+    <form hx-post="/admin/catalog_set_url" hx-target="#catalog-fragment"
+          hx-swap="innerHTML" hx-indicator="#spin"
+          class="m-0 d-flex align-items-center gap-1">
+      <label class="text-muted small mb-0">URL {env_hint}</label>
+      <input class="form-control form-control-sm" type="url" name="url"
+             value="{html.escape(catalog.url, quote=True)}"
+             style="width: 20rem;" required {url_input_attrs}>
+      <button class="btn btn-sm btn-primary" type="submit"
+              {url_input_attrs}>Set &amp; fetch</button>
+      <button class="btn btn-sm btn-outline-secondary" type="button"
+              hx-post="/admin/catalog_refresh" hx-target="#catalog-fragment"
+              hx-swap="innerHTML" hx-indicator="#spin"
+              title="Refetch from current URL">Refresh</button>
+    </form>
+    <span class="text-muted small ms-2">|</span>
+    <form hx-post="/admin/catalog_add_oras" hx-target="#catalog-fragment"
+          hx-swap="innerHTML" hx-indicator="#spin"
+          hx-on::after-request="this.reset()"
+          class="m-0 d-flex align-items-center gap-1">
+      <input class="form-control form-control-sm" type="text" name="url"
+             style="width: 22rem;"
+             placeholder="oras://ghcr.io/owner/repo:tag" required>
+      <button class="btn btn-sm btn-primary" type="submit"
+              title="Add a single image from an oras:// reference"
+              >Add from oras</button>
+    </form>"""
+        return self._subnav(right)
+
+    def _catalog_body_html(self) -> str:
+        return f"""
+  <div id="catalog-fragment"
+       hx-get="/ui/catalog_fragment"
+       hx-trigger="load, every 1s [document.getSelection().isCollapsed]"
+       hx-swap="innerHTML">
+    {self._catalog_fragment_html()}
+  </div>"""
+
+    def _catalog_fragment_html(self) -> str:
+        catalog = self.catalog
+        banner = ""
+        if catalog.last_error:
+            banner = (
+                '<div class="alert alert-danger py-1 px-2 mb-2 small">'
+                '<i class="bi bi-exclamation-triangle-fill me-1"></i>'
+                f"{html.escape(catalog.last_error)}</div>"
+            )
+        elif catalog.last_info:
+            banner = (
+                '<div class="alert alert-success py-1 px-2 mb-2 small">'
+                '<i class="bi bi-check-circle-fill me-1"></i>'
+                f"{html.escape(catalog.last_info)}</div>"
+            )
+        meta = (
+            '<p class="text-muted small mb-2">Last fetched '
+            f"<code>{html.escape(catalog.fetched_at) or 'never'}</code> &middot; "
+            f"{len(catalog.entries)} entries</p>"
+        )
+        return f"""
+    {meta}
+    {banner}
     <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
       <thead class="table-light"><tr>
         <th>Name</th><th>Format</th><th>Arch</th><th>Size</th><th>Source</th><th></th>
       </tr></thead>
-      <tbody>{catalog_rows}</tbody>
-    </table></div>
-  </section>"""
+      <tbody>{self._catalog_rows()}</tbody>
+    </table></div>"""
 
     def _catalog_rows(self) -> str:
-        """One <tr> per catalog image. Cells: name, format, arch,
-        human-readable size, a Source cell whose URL is the
-        withcache /b/ token (so a click through pulls via cache),
-        and a Delete button that removes the entry via
-        ``/admin/catalog_delete_entry``. Empty catalog rows to a
-        "not fetched yet" placeholder + a hint about the Refresh
-        or Fetch controls above."""
         entries = self.catalog.entries
         if not entries:
-            hint = (
-                self.catalog.last_error
-                or "click Fetch / Refresh above, or upload a catalog.toml, to populate."
-            )
+            hint = self.catalog.last_error or "click Refresh above, or Add from oras, to populate."
             return (
                 '<tr><td colspan="6" class="text-center text-muted">'
                 f"<em>{html.escape(hint)}</em></td></tr>"
@@ -2016,10 +2069,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             arch = str(entry.get("arch") or "")
             size_bytes = entry.get("size_bytes")
             size = human_size(int(size_bytes)) if isinstance(size_bytes, int) else ""
-            # Route the Source column via /b/<token>/<name> so a
-            # click serves through withcache -- first hit fills the
-            # cache, subsequent hits serve from disk. Mirrors the
-            # blob-row rendering above.
             if src.startswith(("http://", "https://", "oras://")):
                 token = base64.urlsafe_b64encode(src.encode("utf-8")).decode("ascii").rstrip("=")
                 filename = urllib.parse.urlsplit(src).path.rsplit("/", 1)[-1] or "download"
@@ -2028,8 +2077,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 src_cell = html.escape(src)
             delete_cell = (
-                '<form hx-post="/admin/catalog_delete_entry" hx-target="#dash" '
-                'hx-swap="innerHTML" hx-confirm="Delete this catalog entry?" class="m-0">'
+                '<form hx-post="/admin/catalog_delete_entry" '
+                'hx-target="#catalog-fragment" hx-swap="innerHTML" '
+                'hx-confirm="Delete this catalog entry?" class="m-0">'
                 f'<input type="hidden" name="name" value="{html.escape(name, quote=True)}">'
                 '<button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>'
                 "</form>"
@@ -2045,98 +2095,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "</tr>"
             )
         return "".join(rows)
-
-    def _catalog_controls_html(self) -> str:
-        """The top of the Catalog tab: source + fetched-at metadata,
-        the operator control forms (set URL / upload catalog.toml /
-        add single entry), and the outcome banner (last_info or
-        last_error). Split out so ``render_dash`` stays readable."""
-        catalog = self.catalog
-        env_pinned = bool(catalog.env_url)
-        # Outcome banner: preferred order is error (red) > info (green).
-        # Both are transient (overwritten on the next admin action).
-        banner = ""
-        if catalog.last_error:
-            banner = (
-                '<div class="alert alert-danger py-1 px-2 mb-2 small">'
-                f'<i class="bi bi-exclamation-triangle-fill me-1"></i>'
-                f"{html.escape(catalog.last_error)}</div>"
-            )
-        elif catalog.last_info:
-            banner = (
-                '<div class="alert alert-success py-1 px-2 mb-2 small">'
-                f'<i class="bi bi-check-circle-fill me-1"></i>'
-                f"{html.escape(catalog.last_info)}</div>"
-            )
-        url_input_attrs = (
-            'disabled title="pinned by env WITHCACHE_CATALOG_URL"' if env_pinned else ""
-        )
-        env_hint = (
-            '<span class="badge bg-secondary bg-opacity-10 text-secondary ms-1">env-pinned</span>'
-            if env_pinned
-            else ""
-        )
-        return f"""
-    <div class="row g-2 mb-2">
-      <div class="col-md-6">
-        <div class="d-flex flex-column">
-          <label class="form-label mb-1 small text-muted">Catalog URL {env_hint}</label>
-          <form hx-post="/admin/catalog_set_url" hx-target="#dash" hx-swap="innerHTML"
-                hx-indicator="#spin" class="m-0 d-flex align-items-center gap-1">
-            <input class="form-control form-control-sm" type="url" name="url"
-                   value="{html.escape(catalog.url, quote=True)}" required {url_input_attrs}>
-            <button class="btn btn-sm btn-primary" type="submit"
-                    {url_input_attrs}>Set &amp; fetch</button>
-            <button class="btn btn-sm btn-outline-secondary" type="button"
-                    hx-post="/admin/catalog_refresh" hx-target="#dash" hx-swap="innerHTML"
-                    hx-indicator="#spin" title="Refetch from current URL">Refresh</button>
-          </form>
-        </div>
-      </div>
-      <div class="col-md-6">
-        <label class="form-label mb-1 small text-muted">Upload catalog.toml</label>
-        <form hx-post="/admin/catalog_upload" hx-target="#dash" hx-swap="innerHTML"
-              hx-encoding="multipart/form-data" hx-indicator="#spin"
-              class="m-0 d-flex align-items-center gap-1">
-          <input class="form-control form-control-sm" type="file" name="catalog"
-                 accept=".toml,text/plain" required>
-          <button class="btn btn-sm btn-primary" type="submit">Upload</button>
-        </form>
-      </div>
-    </div>
-    <div class="d-flex flex-wrap align-items-end gap-2 mb-2">
-      <div>
-        <label class="form-label mb-0 small text-muted">Last fetched</label>
-        <div><code>{html.escape(catalog.fetched_at) or "never"}</code>
-             &middot; {len(catalog.entries)} entries</div>
-      </div>
-      <form hx-post="/admin/catalog_add_entry" hx-target="#dash" hx-swap="innerHTML"
-            hx-indicator="#spin" hx-on::after-request="this.reset()"
-            class="m-0 ms-auto d-flex align-items-end flex-wrap gap-1">
-        <div>
-          <label class="form-label mb-0 small text-muted">name</label>
-          <input class="form-control form-control-sm" name="name"
-                 style="width: 10rem;" placeholder="debian-13" required>
-        </div>
-        <div>
-          <label class="form-label mb-0 small text-muted">src</label>
-          <input class="form-control form-control-sm" name="src"
-                 style="width: 16rem;" placeholder="https://.../image.img.zst" required>
-        </div>
-        <div>
-          <label class="form-label mb-0 small text-muted">format</label>
-          <input class="form-control form-control-sm" name="format"
-                 style="width: 7rem;" placeholder="img.zst">
-        </div>
-        <div>
-          <label class="form-label mb-0 small text-muted">arch</label>
-          <input class="form-control form-control-sm" name="arch"
-                 style="width: 6rem;" placeholder="x86_64">
-        </div>
-        <button class="btn btn-sm btn-primary" type="submit">Add entry</button>
-      </form>
-    </div>
-    {banner}"""
 
     def _stream_progress_cell(self, s: Stream) -> str:
         """One progress cell for an active stream: a <progress> bar when the

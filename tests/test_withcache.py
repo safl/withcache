@@ -1029,12 +1029,11 @@ class TestOrasTagRevalidation(unittest.TestCase):
         self.assertFalse(server._oras_tag_moved(self.TAG, self.HEX_A, resolve=_boom))
 
 
-class TestDashActiveTabFromHeader(unittest.TestCase):
-    """``GET /admin/dash`` bakes ``.active-tab`` into the rendered HTML
-    based on the ``X-Active-Tab`` request header. The browser sends the
-    current URL hash on every refresh so the htmx innerHTML swap doesn't
-    visibly blink while a post-swap JS would otherwise re-apply the class.
-    """
+class TestMultiPageNavigation(unittest.TestCase):
+    """Each ``/ui/<page>`` renders a full shell with the matching
+    nav-btn carrying ``.active`` and the page's fragment div hooked
+    up for htmx auto-refresh. ``/`` 302-redirects to ``/ui/cached``
+    (the operator's usual landing)."""
 
     def setUp(self):
         self.httpd, self.store = _start_withcache()
@@ -1044,29 +1043,49 @@ class TestDashActiveTabFromHeader(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
 
-    def _dash(self, active_tab=None):
-        req = urllib.request.Request(self.base + "/admin/dash")
-        if active_tab is not None:
-            req.add_header("X-Active-Tab", active_tab)
+    def _get(self, path):
+        req = urllib.request.Request(self.base + path)
         return urllib.request.urlopen(req).read().decode("utf-8")
 
-    def test_default_tab_when_header_missing(self):
-        body = self._dash()
-        # tab-cached is the first tab and the no-header default
-        self.assertIn('<section id="tab-cached" class="tab active-tab">', body)
-        self.assertIn('<section id="tab-streams" class="tab">', body)
+    def test_root_redirects_to_cached(self):
+        # urllib follows the redirect; assert we landed on /ui/cached
+        # by looking for its active nav-btn.
+        body = self._get("/")
+        self.assertIn('href="/ui/cached"', body)
+        self.assertIn('class="nav-btn active"', body)
 
-    def test_header_picks_the_active_tab(self):
-        body = self._dash("tab-misses")
-        self.assertIn('<section id="tab-misses" class="tab active-tab">', body)
-        self.assertIn('<section id="tab-cached" class="tab">', body)
+    def test_each_page_carries_its_active_navbtn(self):
+        for key in ("cached", "streams", "downloads", "misses", "catalog"):
+            with self.subTest(page=key):
+                body = self._get(f"/ui/{key}")
+                self.assertIn(f'href="/ui/{key}"', body)
+                self.assertIn(f'id="{key}-fragment"', body)
+                self.assertIn('class="nav-btn active"', body)
 
-    def test_unknown_header_value_falls_back_to_first(self):
-        """A hand-crafted X-Active-Tab with a bogus value must not echo
-        into the HTML; the renderer falls back to the first tab."""
-        body = self._dash("tab-totally-not-real")
-        self.assertIn('<section id="tab-cached" class="tab active-tab">', body)
-        self.assertNotIn("tab-totally-not-real", body)
+    def test_downloads_subnav_has_add_from_uri(self):
+        body = self._get("/ui/downloads")
+        self.assertIn('hx-post="/admin/fetch"', body)
+        self.assertIn("Add from URI", body)
+
+    def test_catalog_subnav_has_url_and_oras_forms(self):
+        body = self._get("/ui/catalog")
+        self.assertIn('hx-post="/admin/catalog_set_url"', body)
+        self.assertIn('hx-post="/admin/catalog_add_oras"', body)
+        self.assertIn("Add from oras", body)
+        self.assertNotIn('hx-post="/admin/catalog_upload"', body)
+        self.assertNotIn('hx-post="/admin/catalog_add_entry"', body)
+
+    def test_summary_line_is_gone(self):
+        body = self._get("/ui/cached")
+        self.assertNotIn("misses</span>", body)
+        # No sections/tab-* markers left over from the old dashboard.
+        self.assertNotIn('id="tab-cached"', body)
+
+    def test_fragment_endpoint_returns_body_only(self):
+        body = self._get("/ui/cached_fragment")
+        self.assertIn("<table", body)
+        self.assertNotIn("<html", body)
+        self.assertNotIn("navbar-brand", body)
 
 
 if __name__ == "__main__":
