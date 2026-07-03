@@ -37,11 +37,14 @@ import socketserver
 import sqlite3
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import ClassVar
+from typing import Any, ClassVar
+
+import tomllib
 
 from . import __version__, oras
 
@@ -145,6 +148,86 @@ def resolve_secret(data_dir: str) -> bytes:
     with os.fdopen(fd, "wb") as f:
         f.write(secret)
     return secret
+
+
+DEFAULT_CATALOG_URL = "https://github.com/safl/nosi/releases/latest/download/catalog.toml"
+
+
+@dataclass
+class CatalogState:
+    """Live state of the fetched image catalog.
+
+    withcache does not run a background poller. The catalog is
+    fetched at process start (best-effort, persisted result from
+    the last successful fetch survives a restart), refetched
+    lazily when the dashboard renders and the in-memory copy is
+    older than :data:`CATALOG_CACHE_TTL`, and force-refetched by
+    the operator via the Refresh button (POST /admin/catalog_refresh).
+
+    The raw TOML bytes are persisted to ``<data_dir>/catalog.toml``
+    so a restart doesn't wipe the last known good catalog and the
+    same file can be re-served verbatim to consumers on a future
+    ``GET /catalog.toml`` route.
+    """
+
+    url: str
+    persist_path: str
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    fetched_at: str = ""
+    last_error: str = ""
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def load_persisted(self) -> None:
+        """Best-effort: seed ``entries`` + ``fetched_at`` from the on-disk
+        ``catalog.toml`` if it exists. Never raises; a corrupt or missing
+        file leaves the state empty so the operator sees the "not
+        fetched yet" hint in the dashboard."""
+        if not os.path.isfile(self.persist_path):
+            return
+        try:
+            with open(self.persist_path, "rb") as f:
+                raw = f.read()
+            parsed = tomllib.loads(raw.decode("utf-8"))
+            mtime = os.path.getmtime(self.persist_path)
+            self.entries = list(parsed.get("images") or [])
+            self.fetched_at = datetime.fromtimestamp(mtime, timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        except (OSError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            self.last_error = f"failed to load {self.persist_path}: {e}"
+
+    def fetch_now(self, *, timeout: float = 15.0) -> None:
+        """Fetch the catalog URL, parse, persist raw bytes, populate
+        ``entries``. On failure the previously-cached entries remain;
+        the error is recorded so the tab can surface it. Single-writer
+        via ``self._lock`` so a burst of clicks doesn't double-fetch."""
+        with self._lock:
+            try:
+                req = urllib.request.Request(self.url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read()
+                # Validate before persisting -- a 500 from upstream that
+                # returns HTML must not clobber a previously-good
+                # catalog.toml on disk.
+                parsed = tomllib.loads(raw.decode("utf-8"))
+                entries = list(parsed.get("images") or [])
+                # Atomic write: tempfile + rename so a crash mid-write
+                # never leaves a half-written catalog.toml.
+                tmp = self.persist_path + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(raw)
+                os.replace(tmp, self.persist_path)
+                self.entries = entries
+                self.fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                self.last_error = ""
+            except (
+                urllib.error.URLError,
+                OSError,
+                ValueError,
+                UnicodeDecodeError,
+                tomllib.TOMLDecodeError,
+            ) as e:
+                self.last_error = str(e)
 
 
 class Auth:
@@ -745,6 +828,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def streams(self) -> StreamRegistry:
         return self.server.streams  # type: ignore[attr-defined]
 
+    @property
+    def catalog(self) -> CatalogState:
+        return self.server.catalog  # type: ignore[attr-defined]
+
     def log_message(self, format, *args):  # quieter, single-line
         print(f"{self.address_string()} - {format % args}", flush=True)
 
@@ -793,6 +880,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         "/admin/delete",
         "/admin/cancel",
         "/admin/clear",
+        "/admin/catalog_refresh",
     )
 
     def do_POST(self):
@@ -820,6 +908,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.mgr.cancel(int(jid))
             elif parsed.path == "/admin/clear":
                 self.mgr.clear_finished()
+            elif parsed.path == "/admin/catalog_refresh":
+                self.catalog.fetch_now()
             self.respond_admin()
         else:
             self.send_text(404, "not found\n")
@@ -1354,6 +1444,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         nstreams = len(streams)
         njobs = len(jobs)
 
+        catalog_rows = self._catalog_rows()
+
         return f"""
   <p class="text-muted small mb-2">{nblobs} cached ({used}){full}
     &middot; {nmisses} pending miss(es)</p>
@@ -1367,6 +1459,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         href="#tab-downloads">Downloads ({njobs})</a></li>
       <li class="nav-item"><a class="nav-link {_active("tab-misses").lstrip()}"
         href="#tab-misses">Misses ({nmisses})</a></li>
+      <li class="nav-item"><a class="nav-link {_active("tab-catalog").lstrip()}"
+        href="#tab-catalog">Catalog ({len(self.catalog.entries)})</a></li>
     </ul>
   </nav>
 
@@ -1412,7 +1506,79 @@ class Handler(http.server.BaseHTTPRequestHandler):
       </tr></thead>
       <tbody>{miss_rows}</tbody>
     </table></div>
+  </section>
+
+  <section id="tab-catalog" class="tab{_active("tab-catalog")}">
+    <div class="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
+      <div>
+        <div><small class="text-muted">source</small>
+          &nbsp;<code>{html.escape(self.catalog.url)}</code></div>
+        <div><small class="text-muted">fetched</small>
+          &nbsp;<code>{html.escape(self.catalog.fetched_at) or "never"}</code>
+          {
+            (
+                f'<span class="badge bg-danger-subtle text-danger ms-1">'
+                f"{html.escape(self.catalog.last_error)}</span>"
+            )
+            if self.catalog.last_error
+            else ""
+        }</div>
+      </div>
+      <form hx-post="/admin/catalog_refresh" hx-target="#dash" hx-swap="innerHTML"
+            hx-indicator="#spin" class="m-0">
+        <button class="btn btn-sm btn-primary" type="submit">Refresh</button>
+      </form>
+    </div>
+    <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
+      <thead class="table-light"><tr>
+        <th>Name</th><th>Format</th><th>Arch</th><th>Size</th><th>Source</th>
+      </tr></thead>
+      <tbody>{catalog_rows}</tbody>
+    </table></div>
   </section>"""
+
+    def _catalog_rows(self) -> str:
+        """One <tr> per catalog image. Cells: name, format, arch,
+        human-readable size, and a Source cell whose URL is the
+        withcache /b/ token (so a click through pulls via cache).
+        Empty catalog rows to a "not fetched yet" placeholder + a
+        hint about the Refresh button."""
+        entries = self.catalog.entries
+        if not entries:
+            hint = self.catalog.last_error or "click Refresh above to fetch the catalog manifest"
+            return (
+                '<tr><td colspan="5" class="text-center text-muted">'
+                f"<em>{html.escape(hint)}</em></td></tr>"
+            )
+        rows: list[str] = []
+        for entry in entries:
+            name = str(entry.get("name") or "")
+            src = str(entry.get("src") or "")
+            fmt = str(entry.get("format") or "")
+            arch = str(entry.get("arch") or "")
+            size_bytes = entry.get("size_bytes")
+            size = human_size(int(size_bytes)) if isinstance(size_bytes, int) else ""
+            # Route the Source column via /b/<token>/<name> so a
+            # click serves through withcache -- first hit fills the
+            # cache, subsequent hits serve from disk. Mirrors the
+            # blob-row rendering above.
+            if src.startswith(("http://", "https://", "oras://")):
+                token = base64.urlsafe_b64encode(src.encode("utf-8")).decode("ascii").rstrip("=")
+                filename = urllib.parse.urlsplit(src).path.rsplit("/", 1)[-1] or "download"
+                link = f"/b/{token}/{urllib.parse.quote(filename)}"
+                src_cell = f'<a href="{link}" title="{html.escape(src)}">{html.escape(src)}</a>'
+            else:
+                src_cell = html.escape(src)
+            rows.append(
+                f"<tr>"
+                f"<td>{html.escape(name)}</td>"
+                f'<td class="mono"><small>{html.escape(fmt)}</small></td>'
+                f'<td class="mono"><small>{html.escape(arch)}</small></td>'
+                f"<td>{html.escape(size)}</td>"
+                f'<td class="url">{src_cell}</td>'
+                "</tr>"
+            )
+        return "".join(rows)
 
     def _stream_progress_cell(self, s: Stream) -> str:
         """One progress cell for an active stream: a <progress> bar when the
@@ -1506,6 +1672,25 @@ def main():
     httpd.mgr = mgr  # type: ignore[attr-defined]
     httpd.auto_fetch = not args.curate  # type: ignore[attr-defined]
     httpd.streams = StreamRegistry()  # type: ignore[attr-defined]
+    # Catalog state: env override, else the shipping default (nosi's
+    # rolling catalog manifest). Seeded from the last persisted
+    # catalog.toml on disk so a restart doesn't wipe the cache.
+    catalog_url = (os.environ.get("WITHCACHE_CATALOG_URL") or DEFAULT_CATALOG_URL).strip()
+    catalog = CatalogState(
+        url=catalog_url,
+        persist_path=os.path.join(store.data_dir, "catalog.toml"),
+    )
+    catalog.load_persisted()
+    httpd.catalog = catalog  # type: ignore[attr-defined]
+    # If no catalog is persisted yet, kick a single startup fetch
+    # in a daemon thread so the operator has something to look at
+    # without needing to click Refresh on their first visit.
+    # Failures record ``last_error`` in memory; the dashboard row
+    # shows it. Never blocks the serve loop.
+    if not catalog.entries:
+        threading.Thread(
+            target=catalog.fetch_now, name="withcache-catalog-init", daemon=True
+        ).start()
     print(
         f"withcache cache-host on http://{args.host}:{args.port}  "
         f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "
