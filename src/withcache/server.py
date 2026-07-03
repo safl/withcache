@@ -189,9 +189,7 @@ class CatalogState:
             parsed = tomllib.loads(raw.decode("utf-8"))
             mtime = os.path.getmtime(self.persist_path)
             self.entries = list(parsed.get("images") or [])
-            self.fetched_at = datetime.fromtimestamp(mtime, UTC).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
+            self.fetched_at = datetime.fromtimestamp(mtime, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         except (OSError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
             self.last_error = f"failed to load {self.persist_path}: {e}"
 
