@@ -152,6 +152,30 @@ def resolve_secret(data_dir: str) -> bytes:
 DEFAULT_CATALOG_URL = "https://github.com/safl/nosi/releases/latest/download/catalog.toml"
 
 
+def _serialise_catalog(entries: list[dict[str, Any]]) -> bytes:
+    """Serialise a list of catalog entries back to TOML bytes matching the
+    nosi ``version = 1`` + ``[[images]]`` schema. Stdlib-only, no
+    ``tomli_w`` dep: the schema is flat so a hand-rolled emitter is
+    safer than pulling in a write library. Only known scalar keys are
+    emitted; unknown keys are dropped (silently) so an operator-added
+    row can't smuggle arbitrary TOML through."""
+    out: list[str] = ["version = 1", ""]
+    for e in entries:
+        out.append("[[images]]")
+        for key in ("name", "src", "format", "arch", "sha256"):
+            val = e.get(key)
+            if val is None or val == "":
+                continue
+            # Escape backslashes + quotes then wrap in double quotes.
+            escaped = str(val).replace("\\", "\\\\").replace('"', '\\"')
+            out.append(f'{key} = "{escaped}"')
+        size = e.get("size_bytes")
+        if isinstance(size, int):
+            out.append(f"size_bytes = {size}")
+        out.append("")
+    return "\n".join(out).encode("utf-8")
+
+
 @dataclass
 class CatalogState:
     """Live state of the fetched image catalog.
@@ -167,20 +191,40 @@ class CatalogState:
     so a restart doesn't wipe the last known good catalog and the
     same file can be re-served verbatim to consumers on a future
     ``GET /catalog.toml`` route.
+
+    ``env_url`` records the value pinned via ``$WITHCACHE_CATALOG_URL``
+    (empty if unset). The operator can override the effective URL at
+    runtime via ``POST /admin/catalog_set_url``; the override is
+    persisted to ``<data_dir>/catalog_url`` and wins over the built-in
+    default, but the env var still wins over the operator override so
+    an operator can't silently unblock a locked-down deploy.
     """
 
     url: str
     persist_path: str
+    env_url: str = ""
+    url_override_path: str = ""
     entries: list[dict[str, Any]] = field(default_factory=list)
     fetched_at: str = ""
     last_error: str = ""
+    last_info: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def load_persisted(self) -> None:
         """Best-effort: seed ``entries`` + ``fetched_at`` from the on-disk
-        ``catalog.toml`` if it exists. Never raises; a corrupt or missing
-        file leaves the state empty so the operator sees the "not
-        fetched yet" hint in the dashboard."""
+        ``catalog.toml`` if it exists. Also loads the operator URL
+        override from ``<data_dir>/catalog_url`` when the env var is
+        not set. Never raises; a corrupt or missing file leaves the
+        state empty so the operator sees the "not fetched yet" hint
+        in the dashboard."""
+        if self.url_override_path and os.path.isfile(self.url_override_path) and not self.env_url:
+            try:
+                with open(self.url_override_path, encoding="utf-8") as f:
+                    override = f.read().strip()
+                if override:
+                    self.url = override
+            except OSError:
+                pass
         if not os.path.isfile(self.persist_path):
             return
         try:
@@ -210,13 +254,11 @@ class CatalogState:
                 entries = list(parsed.get("images") or [])
                 # Atomic write: tempfile + rename so a crash mid-write
                 # never leaves a half-written catalog.toml.
-                tmp = self.persist_path + ".tmp"
-                with open(tmp, "wb") as f:
-                    f.write(raw)
-                os.replace(tmp, self.persist_path)
+                self._persist_bytes(raw)
                 self.entries = entries
                 self.fetched_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 self.last_error = ""
+                self.last_info = f"fetched {len(entries)} entries from {self.url}"
             except (
                 urllib.error.URLError,
                 OSError,
@@ -225,6 +267,109 @@ class CatalogState:
                 tomllib.TOMLDecodeError,
             ) as e:
                 self.last_error = str(e)
+
+    def set_url_override(self, new_url: str) -> tuple[bool, str]:
+        """Persist an operator-set URL override to
+        ``<data_dir>/catalog_url``. Env-var pin wins: if
+        ``$WITHCACHE_CATALOG_URL`` is set, the override is rejected
+        so a locked-down deploy stays locked down. Returns
+        ``(ok, message)`` for the UI to surface."""
+        if self.env_url:
+            return False, "env WITHCACHE_CATALOG_URL is pinned; unset it to allow overrides"
+        candidate = new_url.strip()
+        if not candidate:
+            return False, "url is empty"
+        if not candidate.startswith(("http://", "https://")):
+            return False, "url must start with http:// or https://"
+        with self._lock:
+            try:
+                if self.url_override_path:
+                    tmp = self.url_override_path + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        f.write(candidate + "\n")
+                    os.replace(tmp, self.url_override_path)
+                self.url = candidate
+            except OSError as e:
+                return False, str(e)
+        return True, f"catalog url set to {candidate}"
+
+    def replace_from_bytes(self, raw: bytes, *, source_label: str) -> tuple[bool, str]:
+        """Validate + persist an operator-supplied ``catalog.toml``
+        payload (from an upload). On success the in-memory ``entries``
+        are refreshed and ``last_info`` records the source. On
+        validation failure nothing on disk is touched."""
+        try:
+            parsed = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            return False, f"not a valid TOML file: {e}"
+        entries = list(parsed.get("images") or [])
+        with self._lock:
+            try:
+                self._persist_bytes(raw)
+            except OSError as e:
+                return False, str(e)
+            self.entries = entries
+            self.fetched_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.last_error = ""
+            self.last_info = f"loaded {len(entries)} entries from {source_label}"
+        return True, self.last_info
+
+    def add_entry(self, entry: dict[str, Any]) -> tuple[bool, str]:
+        """Append a single ``[[images]]`` row to the persisted catalog
+        and refresh the in-memory list. ``entry`` must have at least
+        ``name`` and ``src``. Duplicate ``name`` replaces the existing
+        row (matches how ``bty-web``'s catalog-import handled dupes)."""
+        name = str(entry.get("name") or "").strip()
+        src = str(entry.get("src") or "").strip()
+        if not name:
+            return False, "name is required"
+        if not src:
+            return False, "src is required"
+        clean: dict[str, Any] = {"name": name, "src": src}
+        for key in ("format", "arch", "sha256"):
+            val = entry.get(key)
+            if isinstance(val, str) and val.strip():
+                clean[key] = val.strip()
+        with self._lock:
+            new_entries = [e for e in self.entries if str(e.get("name") or "") != name]
+            new_entries.append(clean)
+            raw = _serialise_catalog(new_entries)
+            try:
+                self._persist_bytes(raw)
+            except OSError as e:
+                return False, str(e)
+            self.entries = new_entries
+            self.last_error = ""
+            self.last_info = f"added entry: {name}"
+        return True, self.last_info
+
+    def delete_entry(self, name: str) -> tuple[bool, str]:
+        """Remove an entry by ``name``. No-op if absent."""
+        target = name.strip()
+        if not target:
+            return False, "name is required"
+        with self._lock:
+            new_entries = [e for e in self.entries if str(e.get("name") or "") != target]
+            if len(new_entries) == len(self.entries):
+                return False, f"no entry named {target!r}"
+            raw = _serialise_catalog(new_entries)
+            try:
+                self._persist_bytes(raw)
+            except OSError as e:
+                return False, str(e)
+            self.entries = new_entries
+            self.last_error = ""
+            self.last_info = f"deleted entry: {target}"
+        return True, self.last_info
+
+    def _persist_bytes(self, raw: bytes) -> None:
+        """Atomic-replace ``self.persist_path`` with ``raw`` via
+        tempfile + rename so a crash mid-write can never leave a
+        half-written catalog.toml. Callers hold ``self._lock``."""
+        tmp = self.persist_path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(raw)
+        os.replace(tmp, self.persist_path)
 
 
 class Auth:
@@ -878,10 +1023,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         "/admin/cancel",
         "/admin/clear",
         "/admin/catalog_refresh",
+        "/admin/catalog_set_url",
+        "/admin/catalog_upload",
+        "/admin/catalog_add_entry",
+        "/admin/catalog_delete_entry",
     )
 
     def do_POST(self):
         parsed = urllib.parse.urlsplit(self.path)
+        # /admin/catalog_upload reads its own body (multipart); everything
+        # else uses the form parser. Don't try to url-decode multipart
+        # bytes.
+        if parsed.path == "/admin/catalog_upload":
+            if not self.is_authed():
+                self.send_text(401, "login required\n")
+                return
+            self._handle_catalog_upload()
+            self.respond_admin()
+            return
         form = self.read_form()
         if parsed.path == "/ui/login":
             self.handle_login_submit(form)
@@ -907,6 +1066,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.mgr.clear_finished()
             elif parsed.path == "/admin/catalog_refresh":
                 self.catalog.fetch_now()
+            elif parsed.path == "/admin/catalog_set_url":
+                ok, msg = self.catalog.set_url_override(form.get("url", ""))
+                if ok:
+                    # Trigger an immediate fetch so the operator sees
+                    # the new source's entries without a second click.
+                    self.catalog.fetch_now()
+                else:
+                    self.catalog.last_error = msg
+            elif parsed.path == "/admin/catalog_add_entry":
+                entry = {
+                    "name": form.get("name", ""),
+                    "src": form.get("src", ""),
+                    "format": form.get("format", ""),
+                    "arch": form.get("arch", ""),
+                    "sha256": form.get("sha256", ""),
+                }
+                ok, msg = self.catalog.add_entry(entry)
+                if not ok:
+                    self.catalog.last_error = msg
+            elif parsed.path == "/admin/catalog_delete_entry":
+                ok, msg = self.catalog.delete_entry(form.get("name", ""))
+                if not ok:
+                    self.catalog.last_error = msg
             self.respond_admin()
         else:
             self.send_text(404, "not found\n")
@@ -1088,6 +1270,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length).decode("utf-8") if length else ""
         return {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+
+    def _handle_catalog_upload(self) -> None:
+        """Parse a multipart/form-data body with a single ``catalog``
+        file part and forward the raw bytes to
+        ``CatalogState.replace_from_bytes``. Stdlib-only: uses
+        ``email.parser.BytesParser`` to walk the parts (avoids the
+        ``cgi`` module which is slated for removal). On success or
+        failure the outcome is recorded in ``last_info`` /
+        ``last_error`` so ``respond_admin`` renders it inline."""
+        content_type = self.headers.get("Content-Type", "") or ""
+        if not content_type.startswith("multipart/"):
+            self.catalog.last_error = "expected multipart/form-data"
+            return
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length <= 0:
+            self.catalog.last_error = "empty upload"
+            return
+        body = self.rfile.read(length)
+        # BytesParser needs a full "MIME message" header line so it
+        # knows the Content-Type; prepend it verbatim from the request.
+        prelude = f"MIME-Version: 1.0\r\nContent-Type: {content_type}\r\n\r\n".encode()
+        try:
+            import email.parser
+            import email.policy
+
+            msg = email.parser.BytesParser(policy=email.policy.default).parsebytes(prelude + body)
+        except Exception as e:  # noqa: BLE001 -- any parse error is a bad upload
+            self.catalog.last_error = f"multipart parse failed: {e}"
+            return
+        if not msg.is_multipart():
+            self.catalog.last_error = "no multipart parts found"
+            return
+        payload_bytes: bytes | None = None
+        filename = "upload"
+        for part in msg.iter_parts():
+            disp = part.get("Content-Disposition", "") or ""
+            if 'name="catalog"' not in disp:
+                continue
+            payload_bytes = part.get_payload(decode=True)
+            candidate_filename = part.get_filename()
+            if candidate_filename:
+                filename = candidate_filename
+            break
+        if not payload_bytes:
+            self.catalog.last_error = "upload missing 'catalog' file part"
+            return
+        ok, msg_text = self.catalog.replace_from_bytes(payload_bytes, source_label=filename)
+        if not ok:
+            self.catalog.last_error = msg_text
 
     def send_text(self, code: int, text: str):
         data = text.encode("utf-8")
@@ -1469,41 +1700,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
     </div>
 </nav>
 
-<!-- Sub-nav strip. Carries the five tab pills below the main
-     navbar; visually attached (same sticky container, #495057
-     background) but rendered STATIC here so tab labels don't
+<!-- Sub-nav strip. Left side carries the five tab pills below the
+     main navbar; right side carries the page-level "Add from URI"
+     action (bty convention: page-level actions live in the subnav's
+     right-hand subnav-actions slot, not as a full-width card in
+     main). The tab pills are rendered STATIC here so labels don't
      flicker on the 1 Hz htmx dashboard swap. Per-tab counts live
      in the summary line inside the dash content and update on
      every swap. -->
 <div class="subnav-strip">
   <div class="container">
-    <ul class="nav nav-pills flex-nowrap flex-md-wrap">
+    <ul class="nav nav-pills flex-nowrap flex-md-wrap m-0">
       <li class="nav-item"><a class="nav-link" href="#tab-cached">Cached</a></li>
       <li class="nav-item"><a class="nav-link" href="#tab-streams">Streams</a></li>
       <li class="nav-item"><a class="nav-link" href="#tab-downloads">Downloads</a></li>
       <li class="nav-item"><a class="nav-link" href="#tab-misses">Misses</a></li>
       <li class="nav-item"><a class="nav-link" href="#tab-catalog">Catalog</a></li>
-      <span class="ms-auto"><progress id="spin" class="htmx-indicator"></progress></span>
     </ul>
+    <div class="subnav-actions ms-auto d-flex align-items-center gap-1">
+      <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML"
+            hx-indicator="#spin" hx-on::after-request="this.reset()"
+            class="m-0 d-flex align-items-center gap-1">
+        <input class="form-control form-control-sm" type="url" name="url"
+               style="width: 22rem;"
+               placeholder="https://origin/path/artifact.tar.gz" required>
+        <button class="btn btn-sm btn-primary" type="submit" title="Add from URI"
+                >Fetch</button>
+      </form>
+      <progress id="spin" class="htmx-indicator ms-1"
+                style="width:4rem;height:.4rem;"></progress>
+    </div>
   </div>
 </div>
 </div><!-- /.sticky-header -->
 
 <main class="container py-4">
-  <div class="card mb-4">
-    <div class="card-header"><i class="bi bi-cloud-download text-primary"></i> Add from URI</div>
-    <div class="card-body">
-      <form hx-post="/admin/fetch" hx-target="#dash" hx-swap="innerHTML"
-            hx-indicator="#spin" hx-on::after-request="this.reset()">
-        <div class="input-group">
-          <input class="form-control" type="url" name="url"
-            placeholder="https://origin/path/artifact.tar.gz" required>
-          <button class="btn btn-primary" type="submit" style="white-space: nowrap;"
-            >Fetch &amp; store</button>
-        </div>
-      </form>
-    </div>
-  </div>
 
   <!-- The hx-trigger gates polling on the user NOT having an active
        text selection, so highlight-and-copy a URL out of a table cell
@@ -1750,29 +1981,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
   </section>
 
   <section id="tab-catalog" class="tab{_active("tab-catalog")}">
-    <div class="d-flex align-items-center justify-content-between mb-2 flex-wrap gap-2">
-      <div>
-        <div><small class="text-muted">source</small>
-          &nbsp;<code>{html.escape(self.catalog.url)}</code></div>
-        <div><small class="text-muted">fetched</small>
-          &nbsp;<code>{html.escape(self.catalog.fetched_at) or "never"}</code>
-          {
-            (
-                f'<span class="badge bg-danger-subtle text-danger ms-1">'
-                f"{html.escape(self.catalog.last_error)}</span>"
-            )
-            if self.catalog.last_error
-            else ""
-        }</div>
-      </div>
-      <form hx-post="/admin/catalog_refresh" hx-target="#dash" hx-swap="innerHTML"
-            hx-indicator="#spin" class="m-0">
-        <button class="btn btn-sm btn-primary" type="submit">Refresh</button>
-      </form>
-    </div>
+    {self._catalog_controls_html()}
     <div class="table-responsive"><table class="table table-sm table-striped table-hover mb-0">
       <thead class="table-light"><tr>
-        <th>Name</th><th>Format</th><th>Arch</th><th>Size</th><th>Source</th>
+        <th>Name</th><th>Format</th><th>Arch</th><th>Size</th><th>Source</th><th></th>
       </tr></thead>
       <tbody>{catalog_rows}</tbody>
     </table></div>
@@ -1780,15 +1992,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _catalog_rows(self) -> str:
         """One <tr> per catalog image. Cells: name, format, arch,
-        human-readable size, and a Source cell whose URL is the
-        withcache /b/ token (so a click through pulls via cache).
-        Empty catalog rows to a "not fetched yet" placeholder + a
-        hint about the Refresh button."""
+        human-readable size, a Source cell whose URL is the
+        withcache /b/ token (so a click through pulls via cache),
+        and a Delete button that removes the entry via
+        ``/admin/catalog_delete_entry``. Empty catalog rows to a
+        "not fetched yet" placeholder + a hint about the Refresh
+        or Fetch controls above."""
         entries = self.catalog.entries
         if not entries:
-            hint = self.catalog.last_error or "click Refresh above to fetch the catalog manifest"
+            hint = (
+                self.catalog.last_error
+                or "click Fetch / Refresh above, or upload a catalog.toml, to populate."
+            )
             return (
-                '<tr><td colspan="5" class="text-center text-muted">'
+                '<tr><td colspan="6" class="text-center text-muted">'
                 f"<em>{html.escape(hint)}</em></td></tr>"
             )
         rows: list[str] = []
@@ -1810,6 +2027,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 src_cell = f'<a href="{link}" title="{html.escape(src)}">{html.escape(src)}</a>'
             else:
                 src_cell = html.escape(src)
+            delete_cell = (
+                '<form hx-post="/admin/catalog_delete_entry" hx-target="#dash" '
+                'hx-swap="innerHTML" hx-confirm="Delete this catalog entry?" class="m-0">'
+                f'<input type="hidden" name="name" value="{html.escape(name, quote=True)}">'
+                '<button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>'
+                "</form>"
+            )
             rows.append(
                 f"<tr>"
                 f"<td>{html.escape(name)}</td>"
@@ -1817,9 +2041,102 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 f'<td class="mono"><small>{html.escape(arch)}</small></td>'
                 f"<td>{html.escape(size)}</td>"
                 f'<td class="url">{src_cell}</td>'
+                f"<td>{delete_cell}</td>"
                 "</tr>"
             )
         return "".join(rows)
+
+    def _catalog_controls_html(self) -> str:
+        """The top of the Catalog tab: source + fetched-at metadata,
+        the operator control forms (set URL / upload catalog.toml /
+        add single entry), and the outcome banner (last_info or
+        last_error). Split out so ``render_dash`` stays readable."""
+        catalog = self.catalog
+        env_pinned = bool(catalog.env_url)
+        # Outcome banner: preferred order is error (red) > info (green).
+        # Both are transient (overwritten on the next admin action).
+        banner = ""
+        if catalog.last_error:
+            banner = (
+                '<div class="alert alert-danger py-1 px-2 mb-2 small">'
+                f'<i class="bi bi-exclamation-triangle-fill me-1"></i>'
+                f"{html.escape(catalog.last_error)}</div>"
+            )
+        elif catalog.last_info:
+            banner = (
+                '<div class="alert alert-success py-1 px-2 mb-2 small">'
+                f'<i class="bi bi-check-circle-fill me-1"></i>'
+                f"{html.escape(catalog.last_info)}</div>"
+            )
+        url_input_attrs = (
+            'disabled title="pinned by env WITHCACHE_CATALOG_URL"' if env_pinned else ""
+        )
+        env_hint = (
+            '<span class="badge bg-secondary bg-opacity-10 text-secondary ms-1">env-pinned</span>'
+            if env_pinned
+            else ""
+        )
+        return f"""
+    <div class="row g-2 mb-2">
+      <div class="col-md-6">
+        <div class="d-flex flex-column">
+          <label class="form-label mb-1 small text-muted">Catalog URL {env_hint}</label>
+          <form hx-post="/admin/catalog_set_url" hx-target="#dash" hx-swap="innerHTML"
+                hx-indicator="#spin" class="m-0 d-flex align-items-center gap-1">
+            <input class="form-control form-control-sm" type="url" name="url"
+                   value="{html.escape(catalog.url, quote=True)}" required {url_input_attrs}>
+            <button class="btn btn-sm btn-primary" type="submit"
+                    {url_input_attrs}>Set &amp; fetch</button>
+            <button class="btn btn-sm btn-outline-secondary" type="button"
+                    hx-post="/admin/catalog_refresh" hx-target="#dash" hx-swap="innerHTML"
+                    hx-indicator="#spin" title="Refetch from current URL">Refresh</button>
+          </form>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label mb-1 small text-muted">Upload catalog.toml</label>
+        <form hx-post="/admin/catalog_upload" hx-target="#dash" hx-swap="innerHTML"
+              hx-encoding="multipart/form-data" hx-indicator="#spin"
+              class="m-0 d-flex align-items-center gap-1">
+          <input class="form-control form-control-sm" type="file" name="catalog"
+                 accept=".toml,text/plain" required>
+          <button class="btn btn-sm btn-primary" type="submit">Upload</button>
+        </form>
+      </div>
+    </div>
+    <div class="d-flex flex-wrap align-items-end gap-2 mb-2">
+      <div>
+        <label class="form-label mb-0 small text-muted">Last fetched</label>
+        <div><code>{html.escape(catalog.fetched_at) or "never"}</code>
+             &middot; {len(catalog.entries)} entries</div>
+      </div>
+      <form hx-post="/admin/catalog_add_entry" hx-target="#dash" hx-swap="innerHTML"
+            hx-indicator="#spin" hx-on::after-request="this.reset()"
+            class="m-0 ms-auto d-flex align-items-end flex-wrap gap-1">
+        <div>
+          <label class="form-label mb-0 small text-muted">name</label>
+          <input class="form-control form-control-sm" name="name"
+                 style="width: 10rem;" placeholder="debian-13" required>
+        </div>
+        <div>
+          <label class="form-label mb-0 small text-muted">src</label>
+          <input class="form-control form-control-sm" name="src"
+                 style="width: 16rem;" placeholder="https://.../image.img.zst" required>
+        </div>
+        <div>
+          <label class="form-label mb-0 small text-muted">format</label>
+          <input class="form-control form-control-sm" name="format"
+                 style="width: 7rem;" placeholder="img.zst">
+        </div>
+        <div>
+          <label class="form-label mb-0 small text-muted">arch</label>
+          <input class="form-control form-control-sm" name="arch"
+                 style="width: 6rem;" placeholder="x86_64">
+        </div>
+        <button class="btn btn-sm btn-primary" type="submit">Add entry</button>
+      </form>
+    </div>
+    {banner}"""
 
     def _stream_progress_cell(self, s: Stream) -> str:
         """One progress cell for an active stream: a <progress> bar when the
@@ -1913,13 +2230,18 @@ def main():
     httpd.mgr = mgr  # type: ignore[attr-defined]
     httpd.auto_fetch = not args.curate  # type: ignore[attr-defined]
     httpd.streams = StreamRegistry()  # type: ignore[attr-defined]
-    # Catalog state: env override, else the shipping default (nosi's
-    # rolling catalog manifest). Seeded from the last persisted
-    # catalog.toml on disk so a restart doesn't wipe the cache.
-    catalog_url = (os.environ.get("WITHCACHE_CATALOG_URL") or DEFAULT_CATALOG_URL).strip()
+    # Catalog state: env pin wins over everything, then the operator
+    # override on disk (set via /admin/catalog_set_url), then the
+    # shipping default (nosi's rolling catalog manifest). Seeded from
+    # the last persisted catalog.toml on disk so a restart doesn't
+    # wipe the cache.
+    env_catalog_url = (os.environ.get("WITHCACHE_CATALOG_URL") or "").strip()
+    catalog_url = env_catalog_url or DEFAULT_CATALOG_URL
     catalog = CatalogState(
         url=catalog_url,
         persist_path=os.path.join(store.data_dir, "catalog.toml"),
+        env_url=env_catalog_url,
+        url_override_path=os.path.join(store.data_dir, "catalog_url"),
     )
     catalog.load_persisted()
     httpd.catalog = catalog  # type: ignore[attr-defined]
