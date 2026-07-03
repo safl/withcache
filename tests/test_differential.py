@@ -64,7 +64,7 @@ class TestDifferential(unittest.TestCase):
                 "WGETWITHCACHE_SERVER",
             )
         }
-        os.environ["WITHCACHE_SERVER"] = "http://cache:3000"
+        os.environ["WITHCACHE_SERVER"] = "http://cache:8081"
         os.environ["REAL_CURL"] = self.fake_hit  # Python find_real just needs an exe
         os.environ["REAL_WGET"] = self.fake_hit
         os.environ.pop("CURLWITHCACHE_SERVER", None)

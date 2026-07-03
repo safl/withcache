@@ -6,7 +6,7 @@ The wget sibling of curlwithcache. Drop it on $PATH ahead of the real wget
 cache-host and the artifact is cached there, the download is served from the
 cache; otherwise your wget runs exactly as written.
 
-    export WITHCACHE_SERVER=http://withcache-server:3000
+    export WITHCACHE_SERVER=http://withcache-server:8081
     wget https://the/origin/cuda.tar.gz            # cache hit -> local, named cuda.tar.gz
 
 Because the cache URL is path-encoded with the real basename, a bare ``wget

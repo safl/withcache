@@ -1471,7 +1471,7 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def main():
     ap = argparse.ArgumentParser(description="withcache cache-host")
     ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--port", type=int, default=3000)
+    ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--data-dir", default="./data")
     ap.add_argument(
         "--keep-query",

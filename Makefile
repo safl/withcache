@@ -7,7 +7,7 @@ PYTHON    ?= python3
 RUFF      ?= ruff
 PRECOMMIT ?= pre-commit
 ZIG       ?= zig
-PORT      ?= 3000
+PORT      ?= 8081
 # Containerized deploy: prefer podman, fall back to docker.
 COMPOSE   ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker) compose
 COMPOSE_FILE = deploy/compose.yml
@@ -104,7 +104,7 @@ serve: ## Run the cache-host locally (set WITHCACHE_ADMIN_PASSWORD to gate the U
 # -- deploy (containerized cache-host via compose) -------------------------
 up: ## Bring up the containerized cache-host (set WITHCACHE_ADMIN_PASSWORD to gate the UI)
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
-	@echo "cache-host up -> operator UI: http://localhost:3000/"
+	@echo "cache-host up -> operator UI: http://localhost:8081/"
 
 down: ## Stop and remove the cache-host container
 	$(COMPOSE) -f $(COMPOSE_FILE) down

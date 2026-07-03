@@ -7,7 +7,7 @@ withcache cache-host and the artifact is cached there, the download is served
 from the cache; otherwise — server unset, not cached, or unreachable — your curl
 runs exactly as written. Existing scripts need no changes.
 
-    export WITHCACHE_SERVER=http://withcache-server:3000
+    export WITHCACHE_SERVER=http://withcache-server:8081
     curl -fsSL https://the/origin/cuda.tar.gz -o cuda.tar.gz   # cache hit -> local
 
 It wraps the system curl, so all curl flags keep working; on a miss it hands
