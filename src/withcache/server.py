@@ -37,14 +37,13 @@ import socketserver
 import sqlite3
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, ClassVar
-
-import tomllib
 
 from . import __version__, oras
 
@@ -73,7 +72,7 @@ _DB_WRITE_LOCK = threading.Lock()
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _age_human(started_at: float, *, now: float | None = None) -> str:
@@ -190,7 +189,7 @@ class CatalogState:
             parsed = tomllib.loads(raw.decode("utf-8"))
             mtime = os.path.getmtime(self.persist_path)
             self.entries = list(parsed.get("images") or [])
-            self.fetched_at = datetime.fromtimestamp(mtime, timezone.utc).strftime(
+            self.fetched_at = datetime.fromtimestamp(mtime, UTC).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             )
         except (OSError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
@@ -218,7 +217,7 @@ class CatalogState:
                     f.write(raw)
                 os.replace(tmp, self.persist_path)
                 self.entries = entries
-                self.fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                self.fetched_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 self.last_error = ""
             except (
                 urllib.error.URLError,
