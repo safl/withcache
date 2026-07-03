@@ -27,7 +27,7 @@ By default a miss is **auto-fetched**: the request falls through to origin (so
 the caller gets its file straight away), and the cache-host pulls the same
 artifact in the background, so the next request hits. Run with **`--curate`** to
 require a human instead, who reviews the miss list in a small web UI and presses
-**Download** (or pre-seeds via *Add from URI*). Either way the cache-host is the
+**Download** (or pre-seeds via the Downloads-page **Fetch** form). Either way the cache-host is the
 only box that needs internet egress (and any vendor credentials), and clients
 never write to it.
 
