@@ -1,0 +1,11 @@
+# Overlay compose file for from-source dev iteration:
+#   podman compose -f deploy/compose.yml -f deploy/compose.local-build.yml up -d --build
+# The reference deploy/compose.yml uses the published image
+# ``ghcr.io/safl/withcache:latest``; this overlay swaps in a local
+# build from the repo root's Containerfile.
+services:
+  withcache:
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile
+    image: withcache:local
