@@ -1440,5 +1440,210 @@ class TestReadFormDuplicateKeys(unittest.TestCase):
             conn.close()
 
 
+class TestCatalogStateLoadPersisted(unittest.TestCase):
+    """CatalogState.load_persisted is the restart-recovery path (the
+    docstring's whole premise: 'a persisted result from the last
+    successful fetch survives a restart'). Four branches: override
+    present, override absent, TOML corrupt (silent last_error), TOML
+    missing. None were exercised before."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.persist = os.path.join(self.tmpdir, "catalog.toml")
+        self.url_override = os.path.join(self.tmpdir, "catalog_url")
+
+    def _fresh_state(self, *, env_url: str = "") -> "server.CatalogState":
+        return server.CatalogState(
+            url="http://default/catalog.toml",
+            persist_path=self.persist,
+            url_override_path=self.url_override,
+            env_url=env_url,
+        )
+
+    def test_missing_files_leaves_state_empty(self):
+        s = self._fresh_state()
+        s.load_persisted()
+        self.assertEqual(s.entries, [])
+        self.assertEqual(s.fetched_at, "")
+        self.assertEqual(s.last_error, "")
+        # URL stays at default when override file absent.
+        self.assertEqual(s.url, "http://default/catalog.toml")
+
+    def test_valid_toml_populates_entries(self):
+        payload = (
+            b'[[images]]\nname = "demo"\nsrc = "https://x/demo.img.zst"\n'
+            b'[[images]]\nname = "other"\nsrc = "https://x/other.img"\n'
+        )
+        with open(self.persist, "wb") as f:
+            f.write(payload)
+        s = self._fresh_state()
+        s.load_persisted()
+        self.assertEqual([e["name"] for e in s.entries], ["demo", "other"])
+        self.assertTrue(s.fetched_at)  # non-empty ISO timestamp
+        self.assertEqual(s.last_error, "")
+
+    def test_url_override_file_wins_when_env_unset(self):
+        with open(self.url_override, "w", encoding="utf-8") as f:
+            f.write("https://operator-set/catalog.toml\n")
+        s = self._fresh_state()
+        s.load_persisted()
+        self.assertEqual(s.url, "https://operator-set/catalog.toml")
+
+    def test_env_url_pin_beats_url_override_file(self):
+        # Env pinning: operator override MUST NOT sneak past.
+        with open(self.url_override, "w", encoding="utf-8") as f:
+            f.write("https://operator-set/catalog.toml\n")
+        s = self._fresh_state(env_url="https://env-pinned/catalog.toml")
+        s.load_persisted()
+        # Env-url wins; the operator file is ignored.
+        self.assertNotEqual(s.url, "https://operator-set/catalog.toml")
+
+    def test_corrupt_toml_records_last_error_without_raising(self):
+        with open(self.persist, "wb") as f:
+            f.write(b"this is not toml { at all")
+        s = self._fresh_state()
+        s.load_persisted()  # must not raise
+        self.assertEqual(s.entries, [])
+        self.assertTrue(s.last_error)
+        self.assertIn("failed to load", s.last_error)
+
+
+class TestAddOrasEntryDedupeByName(unittest.TestCase):
+    """add_oras_entry replaces an existing entry by name rather than
+    appending -- the whole reason for the list comprehension at
+    line 356. A regression that dropped the filter would silently
+    duplicate rows. TestAddOrasEntryFormatMapping (Pass 9+10)
+    covered only the field-derivation branches."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.catalog = server.CatalogState(
+            url="http://localhost/catalog.toml",
+            persist_path=os.path.join(self.tmpdir, "catalog.toml"),
+        )
+        self._original_resolve = server.oras.resolve_ref
+        server.oras.resolve_ref = lambda ref: types.SimpleNamespace(
+            title="demo.img.zst", size=1234, digest="sha256:abc"
+        )
+
+    def tearDown(self):
+        server.oras.resolve_ref = self._original_resolve
+
+    def test_second_add_of_same_name_replaces_not_appends(self):
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        # Second add with a URL that resolves to the same derived name
+        # should replace the entry (dedupe on name).
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        names = [e["name"] for e in self.catalog.entries]
+        # Exactly one row for the demo name -- not two duplicates.
+        self.assertEqual(names.count("demo-v1"), 1)
+
+
+class TestHealthzEndpoint(unittest.TestCase):
+    """/healthz is what the deploy/Containerfile HEALTHCHECK curl-
+    probes (Pass 7). A regression to 500 / 404 would silently mark
+    every container permanently unhealthy. Nbdmux tests /healthz
+    explicitly; withcache diverged."""
+
+    def setUp(self):
+        self.httpd, _ = _start_withcache()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_healthz_returns_200_ok(self):
+        r = urllib.request.urlopen(self.base + "/healthz")
+        self.assertEqual(r.status, 200)
+        body = r.read().decode("utf-8").strip()
+        self.assertEqual(body, "ok")
+
+    def test_healthz_open_no_auth_required(self):
+        """The read path must never require login -- shims + external
+        health probes can't hold a session cookie."""
+        # Set an admin password; withcache should STILL let /healthz
+        # through without an auth check.
+        self.httpd.auth = server.Auth(b"k", "letmein")
+        r = urllib.request.urlopen(self.base + "/healthz")
+        self.assertEqual(r.status, 200)
+
+
+class TestDownloadManagerClose(unittest.TestCase):
+    """DownloadManager.close() (Pass 9+10) drains worker threads. A
+    regression that failed to send enough STOP sentinels, or that
+    left workers blocking on queue.get(), would leak threads across
+    tests + leave a Ctrl-C'd server hanging."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = server.Store(self.tmpdir, keep_query=False)
+
+    def test_close_terminates_workers_within_timeout(self):
+        mgr = server.DownloadManager(self.store, workers=3)
+        self.assertEqual(len(mgr._threads), 3)
+        # Every worker was started and should terminate on close().
+        for t in mgr._threads:
+            self.assertTrue(t.is_alive())
+        mgr.close(timeout=3.0)
+        for t in mgr._threads:
+            self.assertFalse(t.is_alive(), "worker still alive after close()")
+
+    def test_enqueue_dedupes_already_pending_url(self):
+        """Same URL enqueued twice while the first is still pending
+        should return the same Job id (line 842-843)."""
+        mgr = server.DownloadManager(self.store, workers=0)
+        try:
+            j1 = mgr.enqueue("https://x/a")
+            j2 = mgr.enqueue("https://x/a")
+            self.assertEqual(j1.id, j2.id)
+        finally:
+            mgr.close(timeout=1.0)
+
+    def test_cancel_queued_job_marks_it_cancelled_synchronously(self):
+        """A cancel on a still-queued job flips it to 'cancelled' at
+        the request site rather than waiting for the worker."""
+        mgr = server.DownloadManager(self.store, workers=0)
+        try:
+            job = mgr.enqueue("https://x/queued")
+            self.assertEqual(job.status, "queued")
+            got = mgr.cancel(job.id)
+            self.assertIsNotNone(got)
+            self.assertEqual(got.status, "cancelled")
+            self.assertIsNotNone(got.finished_at)
+        finally:
+            mgr.close(timeout=1.0)
+
+    def test_cancel_unknown_id_returns_none(self):
+        mgr = server.DownloadManager(self.store, workers=0)
+        try:
+            self.assertIsNone(mgr.cancel(12345))
+        finally:
+            mgr.close(timeout=1.0)
+
+
+class TestHumanSize(unittest.TestCase):
+    """human_size feeds the operator UI's Cached / Streams tabs;
+    an off-by-one in the ladder would silently mis-label sizes."""
+
+    def test_zero_is_bytes(self):
+        self.assertIn("B", server.human_size(0))
+
+    def test_bytes_below_kib(self):
+        self.assertIn("B", server.human_size(512))
+
+    def test_kib_range(self):
+        self.assertIn("KiB", server.human_size(2048))
+
+    def test_mib_range(self):
+        self.assertIn("MiB", server.human_size(5 * 1024 * 1024))
+
+    def test_gib_range(self):
+        self.assertIn("GiB", server.human_size(3 * 1024 * 1024 * 1024))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
