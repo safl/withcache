@@ -14,7 +14,12 @@ services:
       # Protect the operator UI. Unset => UI is open (a warning is logged).
       - WITHCACHE_ADMIN_PASSWORD=${WITHCACHE_ADMIN_PASSWORD:-}
       # Optional: pin the session-signing key (else persisted under /data).
-      # - WITHCACHE_SESSION_SECRET=${WITHCACHE_SESSION_SECRET:-}
+      - WITHCACHE_SESSION_SECRET=${WITHCACHE_SESSION_SECRET:-}
+      # Optional: pin the image-catalog URL. When set, the env value
+      # wins over any /admin/catalog_set_url operator override so a
+      # locked-down deploy stays locked. Unset uses the default
+      # (safl/nosi's ``catalog.toml`` on GitHub).
+      - WITHCACHE_CATALOG_URL=${WITHCACHE_CATALOG_URL:-}
     volumes:
       - withcache-data:/data
     restart: unless-stopped
