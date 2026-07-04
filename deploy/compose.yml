@@ -1,28 +1,23 @@
-# Single-host deploy (run from the repo root):
-#   WITHCACHE_ADMIN_PASSWORD=secret podman compose -f deploy/compose.yml up -d
-# (or: docker compose -f deploy/compose.yml up -d)
+# Reference compose stack for withcache.
+#
+# Usage:
+#   cp envvars.example envvars && "${EDITOR:-vi}" envvars   # set the knobs
+#   podman compose --env-file envvars up -d
+#   #   http://<host>:8081/   (operator UI)
 services:
-  cache-host:
-    build:
-      context: ..
-      dockerfile: deploy/Containerfile
-    image: withcache:latest
-    container_name: withcache
-    ports:
-      - "8081:8081"
-    environment:
-      # Protect the operator UI. Unset => UI is open (a warning is logged).
-      - WITHCACHE_ADMIN_PASSWORD=${WITHCACHE_ADMIN_PASSWORD:-}
-      # Optional: pin the session-signing key (else persisted under /data).
-      - WITHCACHE_SESSION_SECRET=${WITHCACHE_SESSION_SECRET:-}
-      # Optional: pin the image-catalog URL. When set, the env value
-      # wins over any /admin/catalog_set_url operator override so a
-      # locked-down deploy stays locked. Unset uses the default
-      # (safl/nosi's ``catalog.toml`` on GitHub).
-      - WITHCACHE_CATALOG_URL=${WITHCACHE_CATALOG_URL:-}
-    volumes:
-      - withcache-data:/data
+  withcache:
+    image: ghcr.io/safl/withcache:latest
     restart: unless-stopped
+    container_name: withcache
+    environment:
+      WITHCACHE_ADMIN_PASSWORD: "${WITHCACHE_ADMIN_PASSWORD:-}"
+      WITHCACHE_SESSION_SECRET: "${WITHCACHE_SESSION_SECRET:-}"
+      WITHCACHE_CATALOG_URL: "${WITHCACHE_CATALOG_URL:-}"
+    ports:
+      - "${HOST_HTTP_PORT:-8081}:8081"
+    volumes:
+      # Persistent: blob store + cache.db + session-secret survive restarts.
+      - withcache-data:/data
 
 volumes:
   withcache-data:

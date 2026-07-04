@@ -1,0 +1,17 @@
+# Copy to ``envvars`` and edit. The compose stack reads this via --env-file.
+
+# Gate the operator UI + control-plane writes. Empty = open (logs a
+# startup warning; only safe on a LAN-internal withcache).
+WITHCACHE_ADMIN_PASSWORD=
+
+# Optional: pin the signed-cookie HMAC key. Unset = auto-generate a
+# fresh 64-hex key at first start and persist it under /data. Set
+# explicitly to keep cookies valid across a container rebuild that
+# wipes the data volume, or to rotate the secret on demand.
+#WITHCACHE_SESSION_SECRET=
+
+# Optional: pin the image-catalog URL. When set, the env value wins
+# over any /admin/catalog_set_url operator override so a locked-down
+# deploy stays locked. Unset uses the default (safl/nosi's
+# ``catalog.toml`` on GitHub).
+#WITHCACHE_CATALOG_URL=
