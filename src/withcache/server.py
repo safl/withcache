@@ -1087,7 +1087,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlsplit(self.path)
-        form = self.read_form()
+        try:
+            form = self.read_form()
+        except ValueError:
+            # Duplicate field(s) -- reject with 400 rather than let
+            # a first-value-wins collapse hide a payload silently.
+            self.send_text(400, "malformed form (duplicate fields?)\n")
+            return
         if parsed.path == "/ui/login":
             self.handle_login_submit(form)
         elif parsed.path == "/ui/logout":
@@ -1208,8 +1214,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 f"{Auth.COOKIE}={self.auth.make_token()}; HttpOnly; "
                 f"SameSite=Lax; Path=/; Max-Age={Auth.MAX_AGE}"
             )
-            self.redirect("/ui/cached", set_cookie=cookie)
+            # Log BEFORE the redirect so the line lands even if the
+            # client drops the connection mid-write, matching the
+            # ordering of the failure branch below.
             print(f"{self.address_string()} - login succeeded", flush=True)
+            self.redirect("/ui/cached", set_cookie=cookie)
         else:
             print(f"{self.address_string()} - login failed", flush=True)
             self.send_html(401, self.render_login(error="Invalid password."))
@@ -1310,9 +1319,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # -- helpers -----------------------------------------------------------
     def read_form(self) -> dict:
+        """Parse form-encoded body into ``{key: value}``. Rejects
+        duplicate keys with ValueError -- an operator-facing form
+        never has repeated field names, so ``name=a&name=b`` is
+        either a bug or a client trying to hide a payload from a
+        naive read of the first value. Callers wrap the call and
+        turn a ValueError into a 400."""
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length).decode("utf-8") if length else ""
-        return {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+        pairs = urllib.parse.parse_qs(body)
+        dups = [k for k, v in pairs.items() if len(v) > 1]
+        if dups:
+            raise ValueError(f"duplicate form field(s): {', '.join(sorted(dups))}")
+        return {k: v[0] for k, v in pairs.items()}
 
     def send_text(self, code: int, text: str):
         data = text.encode("utf-8")

@@ -1316,5 +1316,40 @@ class TestCatalogAdminEndpoints(unittest.TestCase):
         httpd2.server_close()
 
 
+class TestReadFormDuplicateKeys(unittest.TestCase):
+    """read_form rejects duplicate form keys so a first-value-wins
+    collapse can't hide a payload silently -- mirrors nbdmux's
+    Pass 6 hardening for cross-project parity."""
+
+    def setUp(self):
+        self.httpd, self.store = _start_withcache()
+        self.host = "127.0.0.1"
+        self.port = self.httpd.server_address[1]
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_duplicate_form_field_returns_400(self):
+        import http.client
+
+        # Craft a raw body with duplicate ``url`` fields; urlencode +
+        # dict argument would collapse them client-side.
+        body = "url=https%3A%2F%2Fx%2Fa&url=https%3A%2F%2Fx%2Fb"
+        conn = http.client.HTTPConnection(self.host, self.port)
+        try:
+            conn.request(
+                "POST",
+                "/admin/fetch",
+                body=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 400)
+            resp.read()
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
