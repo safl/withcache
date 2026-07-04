@@ -239,6 +239,7 @@ never log in; the **operator surface** (`/`, `/admin/*`) is gated.
 | `CURLWITHCACHE_SERVER` / `WGETWITHCACHE_SERVER` | Per-tool override of the above       |
 | `WITHCACHE_ADMIN_PASSWORD` | Operator login password (unset ⇒ UI open, with a warning) |
 | `WITHCACHE_SESSION_SECRET` | Override the persisted cookie-signing key (optional)     |
+| `WITHCACHE_CATALOG_URL`    | Pin the image-catalog URL; env value beats the /admin/catalog_set_url override so a locked-down deploy stays locked (optional) |
 
 [bty]: https://github.com/safl/bty
 
