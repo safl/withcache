@@ -1348,26 +1348,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         "cancelled": "var(--bs-secondary)",
     }
 
-    # bty ships a Bootstrap 5 stack (bootstrap.min.css +
-    # bootstrap-icons.min.css + htmx). All three ecosystem services
-    # (bty, nbdmux, withcache) share that stack so operators only
-    # learn one UI grammar; the primary hue is what tells them
-    # which service they're on. The trio sits on a
-    # navy -> dark-magenta -> magenta gradient (cool -> hot);
-    # withcache is the dark-magenta middle (the byte cache that
-    # feeds nbdmux and every other consumer).
+    # Withcache is the dark-magenta middle of the trio's
+    # navy -> dark-magenta -> magenta gradient (bty navy, nbdmux
+    # magenta). See the _head docstring below for the shared-stack
+    # + one-UI-grammar rationale.
     _PRIMARY_HEX = "#8f1b71"  # dark-magenta
     _PRIMARY_HOVER = "#7a1861"
     _PRIMARY_RGB = "143, 27, 113"
 
     def _head(self, title: str) -> str:
-        """Emit the shared page prelude: Bootstrap + icons + htmx +
-        the full bty-family chrome CSS. Every service (bty, withcache,
-        nbdmux) uses this same block; the only per-service knob is the
-        primary hue (``--bs-primary`` and the derived button /
-        rgba() variants). See bty's ``_layout.html`` for the origin
-        of these class names -- kept identical here so operators
-        moving between consoles see one visual grammar."""
+        """Emit the shared page prelude: Bootstrap 5 + Bootstrap
+        Icons + htmx + the full bty-family chrome CSS. All three
+        ecosystem services (bty, withcache, nbdmux) use this same
+        block so operators only learn one UI grammar; the primary
+        hue (``--bs-primary`` + the derived button / rgba() variants)
+        is what tells them which service they're on. See bty's
+        ``_layout.html`` for the origin of these class names --
+        kept identical here so operators moving between consoles
+        see one visual grammar."""
         primary = self._PRIMARY_HEX
         hover = self._PRIMARY_HOVER
         rgb = self._PRIMARY_RGB
