@@ -12,6 +12,14 @@ COPY pyproject.toml README.md hatch_build.py /app/
 COPY src /app/src
 RUN pip install --no-cache-dir /app
 
+# curl: HEALTHCHECK below. ``-f`` maps any 4xx/5xx to a non-zero
+# exit without dumping a Traceback, matching the nbdmux sibling's
+# Pass 5 pattern; if a future /healthz ever grows a non-200 branch
+# (e.g. cache-disk-full check), no log-noise regression.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+
 # Run as non-root; /data is the persistent volume for blobs + sqlite.
 RUN useradd --create-home --uid 10001 app \
  && mkdir -p /data && chown app:app /data
@@ -25,6 +33,6 @@ VOLUME ["/data"]
 # with WITHCACHE_SESSION_SECRET.
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/healthz',timeout=2).status==200 else 1)"
+  CMD curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8081/healthz || exit 1
 
 ENTRYPOINT ["withcache-server", "--host", "0.0.0.0", "--port", "8081", "--data-dir", "/data"]
