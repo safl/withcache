@@ -103,8 +103,13 @@ serve: ## Run the cache-host locally (set WITHCACHE_ADMIN_PASSWORD to gate the U
 
 # -- deploy (containerized cache-host via compose) -------------------------
 up: ## Bring up the containerized cache-host (set WITHCACHE_ADMIN_PASSWORD to gate the UI)
-	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
+	$(COMPOSE) -f $(COMPOSE_FILE) up -d
 	@echo "cache-host up -> operator UI: http://localhost:8081/"
+
+# For from-source dev iteration: rebuild the local image and bring it up.
+up-from-source: ## Build the container from local sources and bring it up
+	$(COMPOSE) -f $(COMPOSE_FILE) -f deploy/compose.local-build.yml up -d --build
+	@echo "cache-host (from source) up -> operator UI: http://localhost:8081/"
 
 down: ## Stop and remove the cache-host container
 	$(COMPOSE) -f $(COMPOSE_FILE) down

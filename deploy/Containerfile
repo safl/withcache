@@ -1,6 +1,7 @@
-# withcache cache-host. Build context is the repo root:
+# withcache cache-host. From-source build (rare; the reference
+# compose.yml uses the published ``ghcr.io/safl/withcache:latest``
+# image instead). Build context is the repo root:
 #   podman build -f deploy/Containerfile -t withcache .
-# (deploy/compose.yml sets the context for you.)
 FROM python:3.12-slim
 
 # Install the package (no third-party deps) to get the withcache-server command.
