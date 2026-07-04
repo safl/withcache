@@ -178,6 +178,7 @@ class TestStoreFromOrigin(unittest.TestCase):
         self.store = server.Store(tempfile.mkdtemp(), keep_query=False)
 
     def tearDown(self):
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -266,6 +267,7 @@ class TestTruncatedDownloadRejected(unittest.TestCase):
         self.store = server.Store(tempfile.mkdtemp(), keep_query=False)
 
     def tearDown(self):
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -384,6 +386,7 @@ class TestRangeResumeOnTruncation(unittest.TestCase):
         self.store = server.Store(tempfile.mkdtemp(), keep_query=False)
 
     def tearDown(self):
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -843,6 +846,7 @@ class TestFetchWithHeaders(unittest.TestCase):
         self.store = server.Store(tempfile.mkdtemp(), keep_query=False)
 
     def tearDown(self):
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -1095,6 +1099,7 @@ class TestMultiPageNavigation(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def tearDown(self):
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -1196,6 +1201,7 @@ class TestCatalogAdminEndpoints(unittest.TestCase):
     def tearDown(self):
         self.origin.shutdown()
         self.origin.server_close()
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -1316,6 +1322,88 @@ class TestCatalogAdminEndpoints(unittest.TestCase):
         httpd2.server_close()
 
 
+class TestAddOrasEntryFormatMapping(unittest.TestCase):
+    """CatalogState.add_oras_entry derives ``format`` from the resolved
+    layer title's suffix and ``arch`` from the tag suffix. The
+    happy-path test in TestCatalogAdminEndpoints only covers the
+    unreachable-registry branch (fmt stays ''); this class exercises
+    the title -> format mapping (all five known suffixes + fallback)
+    and the arch extraction."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.catalog = server.CatalogState(
+            url="http://localhost/catalog.toml",
+            persist_path=os.path.join(self.tmpdir, "catalog.toml"),
+        )
+        # Patch oras.resolve_ref for the duration of the tests; every
+        # test sets a fake_resolver with the shape it needs.
+        self._original_resolve = server.oras.resolve_ref
+
+    def tearDown(self):
+        server.oras.resolve_ref = self._original_resolve
+
+    def _stub_resolve(self, title, size=1234):
+        def _r(ref):
+            return types.SimpleNamespace(title=title, size=size, digest="sha256:abc")
+
+        server.oras.resolve_ref = _r
+
+    def test_title_ends_with_img_zst(self):
+        self._stub_resolve("debian-13-headless.img.zst")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        self.assertEqual(self.catalog.entries[-1]["format"], "img.zst")
+
+    def test_title_ends_with_img_gz(self):
+        self._stub_resolve("release.img.gz")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        self.assertEqual(self.catalog.entries[-1]["format"], "img.gz")
+
+    def test_title_ends_with_img_xz(self):
+        self._stub_resolve("release.img.xz")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        self.assertEqual(self.catalog.entries[-1]["format"], "img.xz")
+
+    def test_title_ends_with_bare_img(self):
+        self._stub_resolve("raw.img")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        self.assertEqual(self.catalog.entries[-1]["format"], "img")
+
+    def test_title_ends_with_iso(self):
+        self._stub_resolve("bootable.iso")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        self.assertEqual(self.catalog.entries[-1]["format"], "iso")
+
+    def test_title_no_known_suffix_leaves_format_unset(self):
+        self._stub_resolve("something.tar")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1")
+        self.assertTrue(ok)
+        self.assertNotIn("format", self.catalog.entries[-1])
+
+    def test_tag_suffix_extracts_arch_x86_64(self):
+        self._stub_resolve("release.img.zst")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1-x86_64")
+        self.assertTrue(ok)
+        self.assertEqual(self.catalog.entries[-1]["arch"], "x86_64")
+
+    def test_tag_suffix_extracts_arch_arm64(self):
+        self._stub_resolve("release.img.zst")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1-arm64")
+        self.assertTrue(ok)
+        self.assertEqual(self.catalog.entries[-1]["arch"], "arm64")
+
+    def test_unknown_arch_suffix_leaves_arch_unset(self):
+        self._stub_resolve("release.img.zst")
+        ok, _ = self.catalog.add_oras_entry("oras://ghcr.io/x/demo:v1-mips")
+        self.assertTrue(ok)
+        self.assertNotIn("arch", self.catalog.entries[-1])
+
+
 class TestReadFormDuplicateKeys(unittest.TestCase):
     """read_form rejects duplicate form keys so a first-value-wins
     collapse can't hide a payload silently -- mirrors nbdmux's
@@ -1327,6 +1415,7 @@ class TestReadFormDuplicateKeys(unittest.TestCase):
         self.port = self.httpd.server_address[1]
 
     def tearDown(self):
+        getattr(self.httpd, "mgr", None) and self.httpd.mgr.close()
         self.httpd.shutdown()
         self.httpd.server_close()
 
