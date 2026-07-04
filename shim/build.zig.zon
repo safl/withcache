@@ -2,7 +2,7 @@
     .name = .withcache_shim,
     // Zig requires a literal here; keep it in lockstep with the project's
     // single source (src/withcache/__init__.py) via `make bump` / `make version-check`.
-    .version = "0.8.3",
+    .version = "0.8.4",
     .fingerprint = 0xd7d96c5ed212ccaa,
     .minimum_zig_version = "0.16.0",
     .paths = .{
