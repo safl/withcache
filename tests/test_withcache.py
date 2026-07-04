@@ -31,6 +31,60 @@ from withcache import _shim, client, curlwithcache, server, wgetwithcache
 # --------------------------------------------------------------------------
 # Auth: signed-cookie round-trip, tamper + wrong-secret rejection, expiry
 # --------------------------------------------------------------------------
+class TestResolveSecret(unittest.TestCase):
+    """resolve_secret is the whole basis of the cookie-auth trust
+    boundary: the HMAC key that signs session tokens. Three branches
+    -- env-set, file-persisted, fresh-generation -- and a
+    security-adjacent invariant claimed in its docstring: 'a blank
+    env value must NOT silently weaken signing'. Mirrors nbdmux's
+    TestResolveSecret since the two functions are the same shape."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._saved = os.environ.get("WITHCACHE_SESSION_SECRET")
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("WITHCACHE_SESSION_SECRET", None)
+        else:
+            os.environ["WITHCACHE_SESSION_SECRET"] = self._saved
+
+    def test_env_set_wins(self):
+        os.environ["WITHCACHE_SESSION_SECRET"] = "operator-chosen-secret"
+        self.assertEqual(server.resolve_secret(self.tmpdir), b"operator-chosen-secret")
+
+    def test_env_blank_falls_through_to_fresh_generation(self):
+        """The docstring promises a blank env value must NOT silently
+        weaken signing. A fresh secret must land under data_dir and
+        NOT be the empty string."""
+        os.environ["WITHCACHE_SESSION_SECRET"] = "   "
+        got = server.resolve_secret(self.tmpdir)
+        self.assertGreaterEqual(len(got), 32)
+        self.assertNotEqual(got, b"")
+        persisted = os.path.join(self.tmpdir, "session-secret")
+        self.assertTrue(os.path.exists(persisted))
+
+    def test_env_unset_generates_and_persists(self):
+        os.environ.pop("WITHCACHE_SESSION_SECRET", None)
+        got = server.resolve_secret(self.tmpdir)
+        self.assertGreaterEqual(len(got), 32)
+        with open(os.path.join(self.tmpdir, "session-secret"), "rb") as f:
+            self.assertEqual(f.read(), got)
+
+    def test_file_persisted_returned_on_second_call(self):
+        os.environ.pop("WITHCACHE_SESSION_SECRET", None)
+        first = server.resolve_secret(self.tmpdir)
+        second = server.resolve_secret(self.tmpdir)
+        self.assertEqual(first, second)
+
+    def test_persisted_file_permissions_are_private(self):
+        os.environ.pop("WITHCACHE_SESSION_SECRET", None)
+        server.resolve_secret(self.tmpdir)
+        path = os.path.join(self.tmpdir, "session-secret")
+        mode = os.stat(path).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+
 class TestAuth(unittest.TestCase):
     def test_token_roundtrip(self):
         a = server.Auth(b"secret-key", "pw")
