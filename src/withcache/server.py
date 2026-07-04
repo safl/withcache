@@ -826,6 +826,8 @@ class DownloadManager:
     reports progress and honors a per-job cancel flag. Jobs are in-memory
     (completed artifacts persist as blobs); restarting drops in-flight jobs."""
 
+    _STOP = -1
+
     def __init__(self, store: Store, workers: int = 2):
         self.store = store
         self._jobs: dict[int, Job] = {}
@@ -833,8 +835,24 @@ class DownloadManager:
         self._lock = threading.Lock()
         self._q: queue.Queue[int] = queue.Queue()
         self._ids = itertools.count(1)
+        self._threads: list[threading.Thread] = []
         for _ in range(max(1, workers)):
-            threading.Thread(target=self._worker, daemon=True).start()
+            t = threading.Thread(target=self._worker, daemon=True)
+            t.start()
+            self._threads.append(t)
+
+    def close(self, timeout: float = 3.0) -> None:
+        """Ask each worker to exit and wait for them. Pushes one
+        ``_STOP`` sentinel per worker so an idle ``queue.get()``
+        unblocks; running workers finish their current job first.
+        The daemon=True flag lets ``main()`` exit without calling
+        this, but test fixtures + explicit shutdowns should call
+        it to avoid the sqlite3 finalizer warnings that leaked
+        worker threads produce."""
+        for _ in self._threads:
+            self._q.put(self._STOP)
+        for t in self._threads:
+            t.join(timeout=timeout)
 
     def enqueue(self, url: str, headers: dict | None = None) -> Job:
         with self._lock:
@@ -872,6 +890,8 @@ class DownloadManager:
     def _worker(self):
         while True:
             jid = self._q.get()
+            if jid == self._STOP:
+                return
             with self._lock:
                 job = self._jobs.get(jid)
                 if job is None or job.status != "queued":
@@ -2249,6 +2269,10 @@ def main():
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nbye", flush=True)
+    finally:
+        # Drain workers on shutdown so the sqlite finalizer warnings
+        # from leaked threads stop appearing on Ctrl-C.
+        mgr.close()
 
 
 if __name__ == "__main__":
