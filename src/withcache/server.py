@@ -1821,7 +1821,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 '<progress id="spin" class="htmx-indicator ms-1" '
                 'style="width:4rem;height:.4rem;"></progress></div>'
             )
-        return f'<div class="subnav-strip"><div class="container">{left}{right}</div></div>'
+        # <nav class="navbar subnav-strip"> matches bty's canonical
+        # subnav shape (bty/src/bty/web/_templates/ui/_subnav.html);
+        # ``.navbar`` gets the Bootstrap subnav-strip vertical rhythm,
+        # aria-label + <nav> give screen readers a landmark.
+        return (
+            '<nav class="navbar subnav-strip" aria-label="Section sub-navigation">'
+            f'<div class="container">{left}{right}</div></nav>'
+        )
 
     # ---- Cached page -----------------------------------------------------
     def _cached_body_html(self) -> str:
