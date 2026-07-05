@@ -40,6 +40,7 @@
                     <th>SHA-256</th>
                     <th class="text-end">Hits</th>
                     <th>Fetched</th>
+                    <th class="text-end" style="width: 1%; white-space: nowrap;">Action</th>
                 </tr>
             </thead>
             <tbody>
@@ -51,10 +52,20 @@
                     <td class="small font-monospace">{{ r['sha256'][:12] }}...</td>
                     <td class="text-end">{{ r['hits'] }}</td>
                     <td class="small text-muted">{{ r['fetched_at'] }}</td>
+                    <td class="text-end text-nowrap">
+                        <form method="post" action="/admin/delete" class="d-inline m-0"
+                              onsubmit="return confirm('Delete cached blob for {{ r['url'] }}?');">
+                            <input type="hidden" name="key" value="{{ r['key'] }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger"
+                                    title="Remove this blob from the cache">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </form>
+                    </td>
                 </tr>
                 {% endfor %}
                 {% if not rows %}
-                <tr><td colspan="5" class="text-muted text-center py-3">
+                <tr><td colspan="6" class="text-muted text-center py-3">
                     No cached blobs yet. Bty flashes through withcache
                     populate this list on the first fetch of each
                     catalog artifact.

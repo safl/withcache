@@ -23,6 +23,7 @@
                     <th class="text-end">Count</th>
                     <th>First seen</th>
                     <th>Last seen</th>
+                    <th class="text-end" style="width: 1%; white-space: nowrap;">Action</th>
                 </tr>
             </thead>
             <tbody>
@@ -33,10 +34,29 @@
                     <td class="text-end">{{ r['count'] }}</td>
                     <td class="small text-muted">{{ r['first_seen'] }}</td>
                     <td class="small text-muted">{{ r['last_seen'] }}</td>
+                    <td class="text-end text-nowrap">
+                        {# Fetch: enqueue a background pull of this URL.
+                           Dismiss: remove the row (op curator ack'd
+                           they don't want it). #}
+                        <form method="post" action="/admin/fetch" class="d-inline m-0">
+                            <input type="hidden" name="url" value="{{ r['url'] }}">
+                            <button type="submit" class="btn btn-sm btn-outline-primary me-1"
+                                    title="Enqueue a background fetch of this URL">
+                                <i class="bi bi-cloud-download"></i>
+                            </button>
+                        </form>
+                        <form method="post" action="/admin/dismiss" class="d-inline m-0">
+                            <input type="hidden" name="key" value="{{ r['key'] }}">
+                            <button type="submit" class="btn btn-sm btn-outline-secondary"
+                                    title="Dismiss this recorded miss">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </form>
+                    </td>
                 </tr>
                 {% endfor %}
                 {% if not rows %}
-                <tr><td colspan="4" class="text-muted text-center py-3">
+                <tr><td colspan="5" class="text-muted text-center py-3">
                     No recorded misses yet.
                 </td></tr>
                 {% endif %}
