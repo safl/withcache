@@ -33,7 +33,15 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
 from ._api import register_api_routes
-from .server import Auth, DownloadManager, Store, StreamRegistry, resolve_secret
+from .server import (
+    DEFAULT_CATALOG_URL,
+    Auth,
+    CatalogState,
+    DownloadManager,
+    Store,
+    StreamRegistry,
+    resolve_secret,
+)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _TEMPLATES_DIR = Path(__file__).parent / "_templates"
@@ -67,6 +75,7 @@ def create_app(
     store: Store | None = None,
     mgr: DownloadManager | None = None,
     streams: StreamRegistry | None = None,
+    catalog: CatalogState | None = None,
     auto_fetch: bool = True,
     keep_query: bool = False,
     max_bytes: int = 0,
@@ -130,6 +139,24 @@ def create_app(
     app.state.mgr = mgr if mgr is not None else DownloadManager(app.state.store)
     app.state.streams = streams if streams is not None else StreamRegistry()
     app.state.auto_fetch = auto_fetch
+    # CatalogState mirrors the pre-port ``server.main`` setup: env pin
+    # wins over on-disk override, on-disk override wins over the shipping
+    # default (nosi's rolling catalog manifest). ``load_persisted`` seeds
+    # entries from the last successful fetch so a restart doesn't wipe
+    # the cache. Tests pass a stub via ``catalog=`` to skip disk IO.
+    if catalog is not None:
+        app.state.catalog = catalog
+    else:
+        env_catalog_url = (os.environ.get("WITHCACHE_CATALOG_URL") or "").strip()
+        catalog_url = env_catalog_url or DEFAULT_CATALOG_URL
+        cs = CatalogState(
+            url=catalog_url,
+            persist_path=str(Path(data_dir_str) / "catalog.toml"),
+            env_url=env_catalog_url,
+            url_override_path=str(Path(data_dir_str) / "catalog_url"),
+        )
+        cs.load_persisted()
+        app.state.catalog = cs
 
     register_api_routes(app)
 
@@ -200,9 +227,72 @@ def create_app(
 
     @app.get("/ui/cached", response_class=HTMLResponse)
     def ui_cached(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
-        """Placeholder for the Cached view; renders the shared
-        chrome so the auth gate + layout work end-to-end. Real
-        content lands in a follow-up commit."""
-        return render("ui/_layout.html", request, nav_active="cached")
+        """Cached blobs view: one row per cached artifact with URL,
+        size, sha short, hit count, and last-fetch timestamp. Reads
+        ``app.state.store.list_blobs`` (sorted newest-first)."""
+        rows = app.state.store.list_blobs()
+        total_bytes = app.state.store.total_size()
+        return render(
+            "ui/cached.html",
+            request,
+            nav_active="cached",
+            rows=rows,
+            total_bytes=total_bytes,
+            row_count=len(rows),
+        )
+
+    @app.get("/ui/downloads", response_class=HTMLResponse)
+    def ui_downloads(
+        request: Request, _auth_check: None = Depends(require_ui_auth)
+    ) -> HTMLResponse:
+        """DownloadManager jobs view: queued / running / completed /
+        failed / cancelled, with a progress bar for jobs that report
+        Content-Length. Reads ``app.state.mgr.list``."""
+        jobs = app.state.mgr.list() if hasattr(app.state.mgr, "list") else []
+        return render("ui/downloads.html", request, nav_active="downloads", jobs=jobs)
+
+    @app.get("/ui/misses", response_class=HTMLResponse)
+    def ui_misses(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
+        """Recorded cache misses: URL, count, first-seen, last-seen.
+        Reads ``app.state.store.list_misses`` (sorted by last-seen)."""
+        rows = app.state.store.list_misses()
+        return render("ui/misses.html", request, nav_active="misses", rows=rows)
+
+    @app.get("/ui/catalog", response_class=HTMLResponse)
+    def ui_catalog(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
+        """Catalog view: current URL + env pin + on-disk override
+        provenance, plus the entries table. Read-only for this pass;
+        Refresh + Set URL + Add oras + Delete land in the admin-forms
+        follow-up PR."""
+        cs: CatalogState = app.state.catalog
+        return render(
+            "ui/catalog.html",
+            request,
+            nav_active="catalog",
+            catalog_url=cs.url,
+            catalog_env_url=cs.env_url,
+            catalog_entries=cs.entries,
+            catalog_fetched_at=cs.fetched_at,
+            catalog_last_error=cs.last_error,
+            catalog_last_info=cs.last_info,
+        )
+
+    @app.get("/ui/settings", response_class=HTMLResponse)
+    def ui_settings(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
+        """Read-only Settings view for this pass. Persistent overrides
+        land in the follow-up settings-store PR mirroring nbdmux's
+        Override / Effective / Default pattern."""
+        session_secret_from_env = bool((os.environ.get("WITHCACHE_SESSION_SECRET") or "").strip())
+        return render(
+            "ui/settings.html",
+            request,
+            nav_active="settings",
+            data_dir=data_dir_str,
+            catalog_url=app.state.catalog.url,
+            catalog_env_url=app.state.catalog.env_url,
+            max_bytes=max_bytes,
+            auth_enabled=auth.enabled,
+            session_secret_from_env=session_secret_from_env,
+        )
 
     return app

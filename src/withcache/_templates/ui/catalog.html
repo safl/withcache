@@ -1,0 +1,94 @@
+{% extends "ui/_layout.html" %}
+{% block title %}Catalog - withcache{% endblock %}
+
+{% block intro %}
+<div class="alert alert-secondary small mb-3">
+    The image catalog withcache fetched at process start (best-effort;
+    persisted to ``&lt;data-dir&gt;/catalog.toml`` and re-loaded on
+    restart). Refresh + Set URL + Add oras + Delete actions land in
+    the admin-forms follow-up PR; today the page is read-only.
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="card mb-3">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-globe me-1"></i>Catalog source
+    </div>
+    <div class="card-body small">
+        <div class="row">
+            <div class="col-md-3 text-muted">Effective URL</div>
+            <div class="col-md-9 font-monospace">{{ catalog_url }}</div>
+        </div>
+        <div class="row mt-1">
+            <div class="col-md-3 text-muted">Env pin</div>
+            <div class="col-md-9 font-monospace">
+                {% if catalog_env_url %}
+                {{ catalog_env_url }}
+                {% else %}
+                <span class="text-muted">(unset)</span>
+                {% endif %}
+            </div>
+        </div>
+        {% if catalog_fetched_at %}
+        <div class="row mt-1">
+            <div class="col-md-3 text-muted">Last fetched</div>
+            <div class="col-md-9">{{ catalog_fetched_at }}</div>
+        </div>
+        {% endif %}
+        {% if catalog_last_error %}
+        <div class="alert alert-danger small mt-2 mb-0">
+            <i class="bi bi-exclamation-triangle me-1"></i>{{ catalog_last_error }}
+        </div>
+        {% endif %}
+        {% if catalog_last_info %}
+        <div class="alert alert-info small mt-2 mb-0">{{ catalog_last_info }}</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-list-ul me-1"></i>Catalog entries ({{ catalog_entries|length }})
+    </div>
+    <div class="table-responsive">
+        <table class="table table-striped table-hover mb-0 align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>Name</th>
+                    <th>Source</th>
+                    <th>Format</th>
+                    <th>SHA-256</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for e in catalog_entries %}
+                <tr>
+                    <td class="small">{{ e.get('name', '') }}</td>
+                    <td class="small font-monospace text-truncate" style="max-width: 32rem;"
+                        title="{{ e.get('src') or e.get('url') or '' }}">
+                        {{ e.get('src') or e.get('url') or '' }}
+                    </td>
+                    <td>
+                        {% if e.get('format') %}
+                        <span class="badge bg-light text-dark border">{{ e.format }}</span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                    <td class="small font-monospace">
+                        {% if e.get('sha256') %}{{ e.sha256[:12] }}...{% else %}<span class="text-muted">-</span>{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not catalog_entries %}
+                <tr><td colspan="4" class="text-muted text-center py-3">
+                    No catalog entries yet. The startup fetch will populate
+                    this list; failures land in the source card above.
+                </td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

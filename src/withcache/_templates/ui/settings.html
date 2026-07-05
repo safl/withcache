@@ -1,0 +1,207 @@
+{% extends "ui/_layout.html" %}
+{% block title %}Settings - withcache{% endblock %}
+
+{% block subnav %}
+<nav class="navbar subnav-strip" aria-label="Section sub-navigation">
+    <div class="container">
+        <span class="d-flex align-items-center flex-wrap">
+            <a href="#identity">Identity</a>
+            <span class="vr"></span>
+            <a href="#paths">Storage paths</a>
+            <span class="vr"></span>
+            <a href="#catalog">Catalog</a>
+            <span class="vr"></span>
+            <a href="#auth">Auth</a>
+        </span>
+    </div>
+</nav>
+{% endblock %}
+
+{% block intro %}
+<div class="alert alert-secondary small mb-3">
+    Effective configuration for this withcache instance. Read-only
+    for this pass; persistent overrides mirror bty + nbdmux's
+    Override / Effective / Default shape and land in the follow-up
+    settings-store PR.
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="card mb-3" id="identity">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-info-circle me-1"></i>Identity
+    </div>
+    <div class="table-responsive">
+        <table class="table mb-0 align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>Setting</th>
+                    <th>Effective</th>
+                    <th>Source</th>
+                    <th>Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><i class="bi bi-tag me-1"></i>withcache version</td>
+                    <td><code>{{ version }}</code></td>
+                    <td><span class="badge bg-light text-dark border">package</span></td>
+                    <td class="text-muted small">Container image tag / PyPI release.</td>
+                </tr>
+                <tr>
+                    <td><i class="bi bi-github me-1"></i>Project</td>
+                    <td>
+                        <a href="https://github.com/safl/withcache"
+                           class="text-decoration-none font-monospace">
+                            github.com/safl/withcache
+                        </a>
+                    </td>
+                    <td><span class="badge bg-light text-dark border">static</span></td>
+                    <td class="text-muted small">Release notes + wire-format docs.</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card mb-3" id="paths">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-hdd me-1"></i>Storage paths
+    </div>
+    <div class="table-responsive">
+        <table class="table mb-0 align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>Setting</th>
+                    <th>Effective</th>
+                    <th>Source</th>
+                    <th>Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><i class="bi bi-folder me-1"></i>Data directory</td>
+                    <td class="font-monospace">{{ data_dir }}</td>
+                    <td><span class="badge bg-light text-dark border">CLI --data-dir</span></td>
+                    <td class="text-muted small">
+                        Holds <code>cache.db</code>, <code>blobs/</code>,
+                        <code>catalog.toml</code>, <code>session-secret</code>.
+                    </td>
+                </tr>
+                <tr>
+                    <td><i class="bi bi-hdd-stack me-1"></i>Max cache size</td>
+                    <td>
+                        {% if max_bytes and max_bytes > 0 %}
+                        <code>{{ max_bytes }}</code> bytes
+                        {% else %}
+                        <span class="badge bg-light text-dark border">unlimited</span>
+                        {% endif %}
+                    </td>
+                    <td><span class="badge bg-light text-dark border">CLI --max-bytes</span></td>
+                    <td class="text-muted small">
+                        Cap on total cached bytes. 0 = unlimited. When
+                        full, new fills refuse (delete is manual).
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card mb-3" id="catalog">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-book me-1"></i>Catalog source
+    </div>
+    <div class="table-responsive">
+        <table class="table mb-0 align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>Setting</th>
+                    <th>Effective</th>
+                    <th>Source</th>
+                    <th>Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><i class="bi bi-globe me-1"></i>Catalog URL</td>
+                    <td class="font-monospace small">{{ catalog_url }}</td>
+                    <td><span class="badge bg-light text-dark border">env WITHCACHE_CATALOG_URL</span></td>
+                    <td class="text-muted small">
+                        The URL withcache fetches ``catalog.toml`` bytes
+                        from. Env pin wins over on-disk override;
+                        override wins over the shipping default.
+                    </td>
+                </tr>
+                {% if catalog_env_url %}
+                <tr>
+                    <td class="text-muted"><i class="bi bi-pin me-1"></i>Env pin</td>
+                    <td class="font-monospace small">{{ catalog_env_url }}</td>
+                    <td><span class="badge bg-info text-dark">env-locked</span></td>
+                    <td class="text-muted small">
+                        Env var is set; operator ``/admin/catalog_set_url``
+                        overrides are refused while it is.
+                    </td>
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card mb-3" id="auth">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-shield-lock me-1"></i>Authentication
+    </div>
+    <div class="table-responsive">
+        <table class="table mb-0 align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>Setting</th>
+                    <th>Effective</th>
+                    <th>Source</th>
+                    <th>Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><i class="bi bi-key me-1"></i>Admin password</td>
+                    <td>
+                        {% if auth_enabled %}
+                        <span class="badge bg-success"><i class="bi bi-check-lg me-1"></i>configured</span>
+                        {% else %}
+                        <span class="badge bg-warning text-dark">
+                            <i class="bi bi-unlock me-1"></i>open mode
+                        </span>
+                        {% endif %}
+                    </td>
+                    <td><span class="badge bg-light text-dark border">env WITHCACHE_ADMIN_PASSWORD</span></td>
+                    <td class="text-muted small">
+                        When set, POST admin routes + UI gate on a session
+                        cookie. When unset, the control plane is open
+                        (LAN-only deploy). Byte-serving stays open
+                        regardless so bty can pull from a sibling
+                        container.
+                    </td>
+                </tr>
+                <tr>
+                    <td><i class="bi bi-fingerprint me-1"></i>Session secret</td>
+                    <td>
+                        {% if session_secret_from_env %}
+                        <span class="badge bg-info text-dark">from env</span>
+                        {% else %}
+                        <code>&lt;data-dir&gt;/session-secret</code>
+                        {% endif %}
+                    </td>
+                    <td><span class="badge bg-light text-dark border">env WITHCACHE_SESSION_SECRET</span></td>
+                    <td class="text-muted small">
+                        HMAC key signing the <code>withcache-token</code>
+                        cookie. Persisted to disk when env unset so
+                        cookies survive restarts.
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
