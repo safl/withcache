@@ -6,17 +6,13 @@ shape so the trio's three consoles share one testing + auth +
 chrome pattern; the eventual ``trio-common`` extraction rolls
 these into one library.
 
-The port is staged: this module currently hosts scaffolding only
-(Jinja + static + session middleware + healthz + login) so a
-TestClient-backed test can prove the pattern. The byte-serving
-routes (``/blob``, ``/b/<b64>/<name>``), the operator pages
-(Cached / Downloads / Misses / Catalog / Settings), and the
-DownloadManager thread lifespan wiring migrate in follow-up
-commits.
-
-The stdlib ``server.py`` remains the runtime daemon during the
-port; ``main()`` there is unchanged. That keeps the existing 148
-tests green while this file lands and gets iterated.
+Hosts the operator UI (Cached / Downloads / Misses / Catalog /
+Settings), the byte-serving routes registered via
+:func:`._api.register_api_routes`, the admin form endpoints the
+UI action buttons post to, and the persistent-override Settings
+form for the Warming card's log level. The stdlib ``server.py``
+still holds the daemon entrypoint during the port; ``main()``
+there launches uvicorn against this factory.
 """
 
 from __future__ import annotations
@@ -35,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__
+from . import __version__, _settings_store
 from ._api import register_api_routes
 from .server import (
     DEFAULT_CATALOG_URL,
@@ -195,6 +191,10 @@ def create_app(
         )
         cs.load_persisted()
         app.state.catalog = cs
+    # Ensure the settings table exists so the Settings render + save
+    # handlers don't crash on a fresh cache.db.
+    with app.state.store.conn() as _c:
+        _settings_store.init(_c)
 
     register_api_routes(app)
 
@@ -316,11 +316,32 @@ def create_app(
         )
 
     @app.get("/ui/settings", response_class=HTMLResponse)
-    def ui_settings(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
-        """Read-only Settings view for this pass. Persistent overrides
-        land in the follow-up settings-store PR mirroring nbdmux's
-        Override / Effective / Default pattern."""
+    def ui_settings(
+        request: Request,
+        saved: str | None = None,
+        error: str | None = None,
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> HTMLResponse:
+        """Effective-configuration view with a form-editable Warming
+        card. Mirrors bty + nbdmux's Override / Effective / Default
+        pattern for the log level. Catalog URL persistence still
+        routes through ``CatalogState.set_url_override`` (via the
+        Catalog page's /admin/catalog_set_url form) so the on-disk
+        override file the daemon reads at startup stays the single
+        source of truth."""
         session_secret_from_env = bool((os.environ.get("WITHCACHE_SESSION_SECRET") or "").strip())
+        with app.state.store.conn() as conn:
+            log_level_override = _settings_store.get(conn, _settings_store.KEY_LOG_LEVEL)
+            try:
+                log_level_effective = _settings_store.resolve_log_level(conn)
+                log_level_error: str | None = None
+            except _settings_store.SettingValueError as exc:
+                log_level_effective = log_level_override or ""
+                log_level_error = str(exc)
+        log_level_env = (os.environ.get(_settings_store.ENV_LOG_LEVEL) or "").strip()
+        flash_map = {"warming": "Warming settings saved."}
+        flash = error if error else flash_map.get(saved or "")
+        flash_kind = "danger" if error else ("success" if flash else None)
         return render(
             "ui/settings.html",
             request,
@@ -331,6 +352,49 @@ def create_app(
             max_bytes=max_bytes,
             auth_enabled=auth.enabled,
             session_secret_from_env=session_secret_from_env,
+            log_level_override=log_level_override,
+            log_level_effective=log_level_effective,
+            log_level_env=log_level_env,
+            log_level_error=log_level_error,
+            log_level_default=_settings_store.DEFAULT_LOG_LEVEL,
+            log_levels=list(_settings_store.LOG_LEVELS),
+            flash=flash,
+            flash_kind=flash_kind,
+        )
+
+    @app.post("/admin/settings/warming")
+    def ui_admin_settings_warming(
+        log_level: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        """Persist the Warming card's log-level override. Empty
+        submits clear the row so the resolver falls through to env /
+        default. Invalid values 303 back with ``?error=<msg>`` and
+        DO NOT persist -- rejecting at write time keeps the failure
+        loud rather than deferring it to the next resolve.
+
+        Syncs ``os.environ[WITHCACHE_LOG_LEVEL]`` at save time so
+        code that reads the env var picks up the change without a
+        restart; a cleared override restores whatever env value was
+        present at process start (captured on first save)."""
+        import urllib.parse
+
+        ll = (log_level or "").strip().lower()
+        if ll and ll not in _settings_store.LOG_LEVELS:
+            msg = f"log level {ll!r} not in {list(_settings_store.LOG_LEVELS)}"
+            return RedirectResponse(
+                url="/ui/settings?error=" + urllib.parse.quote(msg, safe=""),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        with app.state.store.conn() as conn:
+            if ll:
+                _settings_store.set_value(conn, _settings_store.KEY_LOG_LEVEL, ll)
+                os.environ[_settings_store.ENV_LOG_LEVEL] = ll
+            else:
+                _settings_store.clear(conn, _settings_store.KEY_LOG_LEVEL)
+        return RedirectResponse(
+            url="/ui/settings?saved=warming#warming",
+            status_code=status.HTTP_303_SEE_OTHER,
         )
 
     # ---------- Admin form endpoints ------------------------------------
