@@ -1,18 +1,16 @@
-"""FastAPI app factory for withcache (v0.9.0 port).
+"""FastAPI app factory for withcache.
 
-Replaces the stdlib ``http.server``-based ``server.py`` request
-handler with a FastAPI application. Mirrors ``nbdmux._app`` in
-shape so the trio's three consoles share one testing + auth +
-chrome pattern; the eventual ``trio-common`` extraction rolls
-these into one library.
+Mirrors :mod:`nbdmux._app` in shape so the trio's three consoles
+share one testing + auth + chrome pattern; the eventual
+``trio-common`` extraction rolls these into one library.
 
 Hosts the operator UI (Cached / Downloads / Misses / Catalog /
 Settings), the byte-serving routes registered via
 :func:`._api.register_api_routes`, the admin form endpoints the
 UI action buttons post to, and the persistent-override Settings
-form for the Warming card's log level. The stdlib ``server.py``
-still holds the daemon entrypoint during the port; ``main()``
-there launches uvicorn against this factory.
+form for the Warming card's log level. :func:`withcache.server.main`
+constructs the runtime objects and launches uvicorn against this
+factory.
 """
 
 from __future__ import annotations
@@ -94,9 +92,8 @@ def create_app(
 
     ``store`` / ``mgr`` / ``streams`` / ``auto_fetch`` let tests
     inject stubs / capture doubles without spawning the real
-    :class:`DownloadManager` worker thread. The daemon path
-    (``server.main`` post-cut-over) passes real instances via a
-    lifespan hook.
+    :class:`DownloadManager` worker thread. :func:`server.main`
+    passes real instances at daemon start.
     """
     data_dir_str = str(data_dir)
     Path(data_dir_str).mkdir(parents=True, exist_ok=True)
@@ -118,9 +115,9 @@ def create_app(
         """
         if run_lifecycle:
             # Kick the startup catalog fetch when the on-disk
-            # persisted catalog is empty. Same shape the pre-port
-            # ``server.main`` had; daemon=True so a slow / broken
-            # upstream doesn't block ``uvicorn.run``'s serve loop.
+            # persisted catalog is empty. daemon=True so a slow /
+            # broken upstream doesn't block ``uvicorn.run``'s serve
+            # loop.
             if not _app.state.catalog.entries:
                 threading.Thread(
                     target=_app.state.catalog.fetch_now,
@@ -146,8 +143,8 @@ def create_app(
     )
 
     # SessionMiddleware signs a cookie with the same shape (name +
-    # HttpOnly + SameSite=Lax + Max-Age) the pre-port stdlib server
-    # emitted, so a rolling deploy doesn't invalidate existing
+    # HttpOnly + SameSite=Lax + Max-Age) as bty + nbdmux so a
+    # rolling deploy across the trio doesn't invalidate existing
     # browser sessions.
     app.add_middleware(
         SessionMiddleware,
@@ -173,11 +170,11 @@ def create_app(
     app.state.mgr = mgr if mgr is not None else DownloadManager(app.state.store)
     app.state.streams = streams if streams is not None else StreamRegistry()
     app.state.auto_fetch = auto_fetch
-    # CatalogState mirrors the pre-port ``server.main`` setup: env pin
-    # wins over on-disk override, on-disk override wins over the shipping
-    # default (nosi's rolling catalog manifest). ``load_persisted`` seeds
-    # entries from the last successful fetch so a restart doesn't wipe
-    # the cache. Tests pass a stub via ``catalog=`` to skip disk IO.
+    # CatalogState resolution: env pin wins over on-disk override,
+    # on-disk override wins over the shipping default (nosi's rolling
+    # catalog manifest). ``load_persisted`` seeds entries from the
+    # last successful fetch so a restart doesn't wipe the cache.
+    # Tests pass a stub via ``catalog=`` to skip disk IO.
     if catalog is not None:
         app.state.catalog = catalog
     else:
@@ -257,7 +254,7 @@ def create_app(
         request.session.clear()
         return RedirectResponse(url="/ui/login", status_code=status.HTTP_303_SEE_OTHER)
 
-    # ---------- Root redirect + placeholder pages -----------------------
+    # ---------- Root redirect + operator UI pages -----------------------
 
     @app.get("/")
     def _root() -> RedirectResponse:
@@ -299,9 +296,8 @@ def create_app(
     @app.get("/ui/catalog", response_class=HTMLResponse)
     def ui_catalog(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
         """Catalog view: current URL + env pin + on-disk override
-        provenance, plus the entries table. Read-only for this pass;
-        Refresh + Set URL + Add oras + Delete land in the admin-forms
-        follow-up PR."""
+        provenance, plus the entries table. Refresh + Set URL +
+        Add oras + Delete are on the subnav / row forms."""
         cs: CatalogState = app.state.catalog
         return render(
             "ui/catalog.html",
@@ -399,12 +395,11 @@ def create_app(
 
     # ---------- Admin form endpoints ------------------------------------
     #
-    # Form-encoded siblings of the operator actions the pre-port
-    # ``server.Handler`` dispatched on ``self.ADMIN_POST``. Each 303s
-    # to a sensible /ui/* target so the browser flips to GET and the
-    # dashboard reflects the mutation. Auth-gated -- the JSON /blob
-    # + /b/ byte-serving routes stay open (bty polls from a sibling
-    # container) but writes gate on the session cookie.
+    # Form-encoded operator actions the UI action buttons post to.
+    # Each 303s to a sensible /ui/* target so the browser flips to
+    # GET and the dashboard reflects the mutation. Auth-gated -- the
+    # JSON /blob + /b/ byte-serving routes stay open (bty polls from
+    # a sibling container) but writes gate on the session cookie.
 
     @app.post("/admin/fetch")
     def ui_admin_fetch(
@@ -413,8 +408,8 @@ def create_app(
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
         """Enqueue a background fetch. Optional ``header`` field
-        carries a curated authorization payload -- format matches
-        the pre-port ``parse_headers`` helper."""
+        carries a curated authorization payload, parsed by
+        :func:`withcache.server.parse_headers`."""
         from .server import parse_headers
 
         u = (url or "").strip()

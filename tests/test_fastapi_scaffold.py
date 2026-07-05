@@ -38,7 +38,7 @@ except (ImportError, RuntimeError):  # pragma: no cover
     # ``testclient`` raises when httpx isn't installed. Either way,
     # skip so an unprepped CI runner reports a green skip rather
     # than a red error.
-    raise unittest.SkipTest("fastapi + httpx not available (port scaffolding deps)") from None
+    raise unittest.SkipTest("fastapi + httpx not installed") from None
 
 from withcache._app import create_app  # noqa: E402
 

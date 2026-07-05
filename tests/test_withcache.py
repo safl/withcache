@@ -20,8 +20,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import base64
 import urllib.error
-import urllib.parse
-import urllib.request
 
 from withcache import _shim, server
 
