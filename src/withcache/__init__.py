@@ -1,4 +1,4 @@
-"""withcache — operator-curated, URL-keyed artifact cache for a small lab.
+"""withcache, operator-curated URL-keyed artifact cache for a small lab.
 
 - ``withcache-server`` (withcache.server:main): the cache-host.
 - ``curlwithcache`` / ``wgetwithcache``: transparent curl/wget shims, shipped
@@ -11,12 +11,16 @@
   uses it on a cold miss; library consumers (e.g. ``bty``) import it to
   validate catalog entries and pre-resolve content digests.
 
-All modules are stdlib-only and self-contained.
+Since v0.9.0 the daemon runs on FastAPI + Jinja + Bootstrap 5 + htmx
+(matching bty-web + nbdmux, the eventual ``trio-common`` extraction
+target); ``withcache.client``, ``withcache.oras``, and the shim
+launchers stay stdlib-only so downstream consumers (bty) don't
+inherit the framework floor.
 """
 
 from . import oras
 from .client import blob_url, cache_base, is_cached, serve_url
 
-__version__ = "0.8.10"
+__version__ = "0.9.0"
 
 __all__ = ["__version__", "blob_url", "cache_base", "is_cached", "oras", "serve_url"]
