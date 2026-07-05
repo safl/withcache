@@ -89,7 +89,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install .
+      - run: pip install . httpx
       - run: make shim test
 
   # Platform wheels (static-musl binary, manylinux + musllinux tags) + the pure
