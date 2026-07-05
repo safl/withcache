@@ -506,30 +506,6 @@ class TestStreamRegistry(unittest.TestCase):
         self.assertEqual(reg.snapshot(), [])
 
 
-class TestAgeHuman(unittest.TestCase):
-    """``_age_human`` renders elapsed seconds into the compact form the
-    Streams table cell shows. Inject ``now`` so the test doesn't have
-    to monkeypatch ``time.time``."""
-
-    def test_seconds_only(self):
-        self.assertEqual(server._age_human(100.0, now=100.0), "0s")
-        self.assertEqual(server._age_human(100.0, now=159.0), "59s")
-
-    def test_minutes_pad_seconds(self):
-        self.assertEqual(server._age_human(100.0, now=160.0), "1m00s")
-        self.assertEqual(server._age_human(100.0, now=222.0), "2m02s")
-
-    def test_hours_pad_minutes(self):
-        self.assertEqual(server._age_human(0.0, now=3600.0), "1h00m")
-        self.assertEqual(server._age_human(0.0, now=3661.0), "1h01m")
-        self.assertEqual(server._age_human(0.0, now=7320.0), "2h02m")
-
-    def test_negative_clamps_to_zero(self):
-        # Started-at in the future (clock skew, replayed snapshot) renders
-        # as 0s rather than a confusing negative.
-        self.assertEqual(server._age_human(200.0, now=100.0), "0s")
-
-
 # --------------------------------------------------------------------------
 # _shim: URL detection, rewrite, real-tool resolution, env, path-encoding
 # --------------------------------------------------------------------------

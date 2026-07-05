@@ -19,8 +19,8 @@ the parts of the daemon that stay stdlib:
   bty flashes against, persisted to
   ``<data-dir>/catalog.toml`` between restarts.
 - Helpers: ``resolve_secret``, ``parse_size``, ``parse_headers``,
-  ``now_iso``, ``_age_human``, ``human_size``, ``_b64e`` /
-  ``_b64d``, ``_serialise_catalog``, ``_oras_tag_moved``.
+  ``now_iso``, ``human_size``, ``_b64e`` / ``_b64d``,
+  ``_serialise_catalog``, ``_oras_tag_moved``.
 - ``main()``: CLI entrypoint that constructs Store + DownloadManager
   and hands them to :func:`withcache._app.create_app`, then boots
   uvicorn. SIGTERM / SIGINT handling is uvicorn's.
@@ -72,18 +72,6 @@ _DB_WRITE_LOCK = threading.Lock()
 
 def now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _age_human(started_at: float, *, now: float | None = None) -> str:
-    """Render seconds-since as a compact ``Ns`` / ``Nm`` / ``Nh`` string for
-    the streams table. ``now`` is injectable so tests don't need
-    monkeypatching ``time.time`` to assert formatting."""
-    elapsed = int(max(0.0, (now if now is not None else time.time()) - started_at))
-    if elapsed < 60:
-        return f"{elapsed}s"
-    if elapsed < 3600:
-        return f"{elapsed // 60}m{elapsed % 60:02d}s"
-    return f"{elapsed // 3600}h{(elapsed % 3600) // 60:02d}m"
 
 
 def human_size(n: int) -> str:

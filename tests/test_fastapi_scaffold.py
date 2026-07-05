@@ -33,12 +33,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
     from fastapi.testclient import TestClient  # noqa: E402
-except (ImportError, RuntimeError):  # pragma: no cover
-    # ImportError -> fastapi absent; RuntimeError -> starlette's
-    # ``testclient`` raises when httpx isn't installed. Either way,
-    # skip so an unprepped CI runner reports a green skip rather
-    # than a red error.
-    raise unittest.SkipTest("fastapi + httpx not installed") from None
+except ImportError:  # pragma: no cover
+    raise unittest.SkipTest("fastapi not installed") from None
 
 from withcache._app import create_app  # noqa: E402
 

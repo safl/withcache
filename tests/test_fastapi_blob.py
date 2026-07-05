@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 try:
     from fastapi.testclient import TestClient  # noqa: E402
-except (ImportError, RuntimeError):  # pragma: no cover
-    raise unittest.SkipTest("fastapi + httpx not installed") from None
+except ImportError:  # pragma: no cover
+    raise unittest.SkipTest("fastapi not installed") from None
 
 from withcache._app import create_app  # noqa: E402
 
