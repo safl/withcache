@@ -333,4 +333,107 @@ def create_app(
             session_secret_from_env=session_secret_from_env,
         )
 
+    # ---------- Admin form endpoints ------------------------------------
+    #
+    # Form-encoded siblings of the operator actions the pre-port
+    # ``server.Handler`` dispatched on ``self.ADMIN_POST``. Each 303s
+    # to a sensible /ui/* target so the browser flips to GET and the
+    # dashboard reflects the mutation. Auth-gated -- the JSON /blob
+    # + /b/ byte-serving routes stay open (bty polls from a sibling
+    # container) but writes gate on the session cookie.
+
+    @app.post("/admin/fetch")
+    def ui_admin_fetch(
+        url: str = Form(""),
+        header: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        """Enqueue a background fetch. Optional ``header`` field
+        carries a curated authorization payload -- format matches
+        the pre-port ``parse_headers`` helper."""
+        from .server import parse_headers
+
+        u = (url or "").strip()
+        if u:
+            app.state.mgr.enqueue(u, headers=parse_headers(header or ""))
+        return RedirectResponse(url="/ui/downloads", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/dismiss")
+    def ui_admin_dismiss(
+        key: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        k = (key or "").strip()
+        if k:
+            app.state.store.dismiss(k)
+        return RedirectResponse(url="/ui/misses", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/delete")
+    def ui_admin_delete_blob(
+        key: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        k = (key or "").strip()
+        if k:
+            app.state.store.delete_blob(k)
+        return RedirectResponse(url="/ui/cached", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/cancel")
+    def ui_admin_cancel(
+        id: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        jid = (id or "").strip()
+        if jid.isdigit():
+            app.state.mgr.cancel(int(jid))
+        return RedirectResponse(url="/ui/downloads", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/clear")
+    def ui_admin_clear(
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        app.state.mgr.clear_finished()
+        return RedirectResponse(url="/ui/downloads", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/catalog_refresh")
+    def ui_admin_catalog_refresh(
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        app.state.catalog.fetch_now()
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/catalog_set_url")
+    def ui_admin_catalog_set_url(
+        url: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        """Persist an operator override for the catalog URL. Success
+        triggers an immediate fetch so the entries table reflects the
+        new source without a second click. Failure records the reason
+        on ``catalog.last_error`` and the Catalog page surfaces it."""
+        ok, msg = app.state.catalog.set_url_override(url or "")
+        if ok:
+            app.state.catalog.fetch_now()
+        else:
+            app.state.catalog.last_error = msg
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/catalog_add_oras")
+    def ui_admin_catalog_add_oras(
+        url: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        app.state.catalog.add_oras_entry(url or "")
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/catalog_delete_entry")
+    def ui_admin_catalog_delete_entry(
+        name: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        ok, msg = app.state.catalog.delete_entry(name or "")
+        if not ok:
+            app.state.catalog.last_error = msg
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+
     return app

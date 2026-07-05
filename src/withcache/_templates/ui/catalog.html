@@ -1,12 +1,27 @@
 {% extends "ui/_layout.html" %}
 {% block title %}Catalog - withcache{% endblock %}
 
+{% block subnav %}
+<nav class="navbar subnav-strip" aria-label="Section sub-navigation">
+    <div class="container">
+        <span class="ms-auto d-flex align-items-center gap-2">
+            <form method="post" action="/admin/catalog_refresh" class="m-0">
+                <button type="submit" class="btn btn-sm btn-outline-primary"
+                        title="GET the catalog URL and re-parse entries">
+                    <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                </button>
+            </form>
+        </span>
+    </div>
+</nav>
+{% endblock %}
+
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
     The image catalog withcache fetched at process start (best-effort;
     persisted to ``&lt;data-dir&gt;/catalog.toml`` and re-loaded on
-    restart). Refresh + Set URL + Add oras + Delete actions land in
-    the admin-forms follow-up PR; today the page is read-only.
+    restart). Refresh + Set URL + Add oras + Delete actions on the
+    subnav / row forms below.
 </div>
 {% endblock %}
 
@@ -44,6 +59,48 @@
         {% if catalog_last_info %}
         <div class="alert alert-info small mt-2 mb-0">{{ catalog_last_info }}</div>
         {% endif %}
+        {# Set URL: operator override. Empty submit clears the override
+           and falls back to the shipping default (env pin still wins). #}
+        <form method="post" action="/admin/catalog_set_url" class="mt-3 mb-0">
+            <label for="catalog-url-input" class="form-label small mb-1">
+                Override catalog URL
+            </label>
+            <div class="d-flex gap-2">
+                <input type="url" class="form-control form-control-sm font-monospace"
+                       id="catalog-url-input" name="url"
+                       placeholder="https://... or oras://owner/repo:tag"
+                       value="{% if not catalog_env_url %}{{ catalog_url }}{% endif %}">
+                <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">
+                    <i class="bi bi-save me-1"></i>Set URL
+                </button>
+            </div>
+            <div class="form-text small">
+                {% if catalog_env_url %}
+                Env pin is set; override is refused while the env var is
+                present. Unset <code>WITHCACHE_CATALOG_URL</code> to
+                allow overrides.
+                {% else %}
+                Empty submit clears the override and reverts to the
+                shipping default.
+                {% endif %}
+            </div>
+        </form>
+        {# Add oras: append a fresh oras:// entry to the in-memory
+           catalog. Useful for one-off pulls that aren't in the
+           upstream manifest. #}
+        <form method="post" action="/admin/catalog_add_oras" class="mt-2 mb-0">
+            <label for="catalog-add-oras-input" class="form-label small mb-1">
+                Add oras:// entry
+            </label>
+            <div class="d-flex gap-2">
+                <input type="text" class="form-control form-control-sm font-monospace"
+                       id="catalog-add-oras-input" name="url" required
+                       placeholder="oras://ghcr.io/owner/repo:tag">
+                <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">
+                    <i class="bi bi-plus-circle me-1"></i>Add
+                </button>
+            </div>
+        </form>
     </div>
 </div>
 
@@ -59,6 +116,7 @@
                     <th>Source</th>
                     <th>Format</th>
                     <th>SHA-256</th>
+                    <th class="text-end" style="width: 1%; white-space: nowrap;">Action</th>
                 </tr>
             </thead>
             <tbody>
@@ -79,10 +137,20 @@
                     <td class="small font-monospace">
                         {% if e.get('sha256') %}{{ e.sha256[:12] }}...{% else %}<span class="text-muted">-</span>{% endif %}
                     </td>
+                    <td class="text-end text-nowrap">
+                        <form method="post" action="/admin/catalog_delete_entry" class="d-inline m-0"
+                              onsubmit="return confirm('Delete catalog entry {{ e.get('name', '') }}?');">
+                            <input type="hidden" name="name" value="{{ e.get('name', '') }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger"
+                                    title="Remove this catalog entry">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </form>
+                    </td>
                 </tr>
                 {% endfor %}
                 {% if not catalog_entries %}
-                <tr><td colspan="4" class="text-muted text-center py-3">
+                <tr><td colspan="5" class="text-muted text-center py-3">
                     No catalog entries yet. The startup fetch will populate
                     this list; failures land in the source card above.
                 </td></tr>

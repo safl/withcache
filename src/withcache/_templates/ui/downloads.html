@@ -1,12 +1,27 @@
 {% extends "ui/_layout.html" %}
 {% block title %}Downloads - withcache{% endblock %}
 
+{% block subnav %}
+<nav class="navbar subnav-strip" aria-label="Section sub-navigation">
+    <div class="container">
+        <span class="ms-auto d-flex align-items-center gap-2">
+            <form method="post" action="/admin/clear" class="m-0">
+                <button type="submit" class="btn btn-sm btn-outline-secondary"
+                        title="Drop completed / failed / cancelled rows from the list.">
+                    <i class="bi bi-broom me-1"></i>Clear finished
+                </button>
+            </form>
+        </span>
+    </div>
+</nav>
+{% endblock %}
+
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
     Operator-triggered downloads run here (not in the request
     handler). Each job walks through queued -> running -> completed
-    (or failed / cancelled). Cancel + Clear-finished actions land in
-    the admin-forms follow-up PR.
+    (or failed / cancelled). Cancel per row + Clear-finished on the
+    subnav strip.
 </div>
 {% endblock %}
 
@@ -24,6 +39,7 @@
                     <th>Status</th>
                     <th>Progress</th>
                     <th>Error</th>
+                    <th class="text-end" style="width: 1%; white-space: nowrap;">Action</th>
                 </tr>
             </thead>
             <tbody>
@@ -58,10 +74,21 @@
                         {% endif %}
                     </td>
                     <td class="small text-danger">{{ j.error or '' }}</td>
+                    <td class="text-end text-nowrap">
+                        {% if j.status in ('queued', 'running') %}
+                        <form method="post" action="/admin/cancel" class="d-inline m-0">
+                            <input type="hidden" name="id" value="{{ j.id }}">
+                            <button type="submit" class="btn btn-sm btn-outline-warning"
+                                    title="Cancel this download">
+                                <i class="bi bi-x-circle"></i>
+                            </button>
+                        </form>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
                 {% if not jobs %}
-                <tr><td colspan="5" class="text-muted text-center py-3">
+                <tr><td colspan="6" class="text-muted text-center py-3">
                     No download jobs. Operator triggers a fetch from the
                     Misses tab or via the JSON API.
                 </td></tr>
