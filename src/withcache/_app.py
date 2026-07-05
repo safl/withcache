@@ -32,7 +32,8 @@ from jinja2 import Environment, FileSystemLoader
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
-from .server import Auth, resolve_secret
+from ._api import register_api_routes
+from .server import Auth, DownloadManager, Store, StreamRegistry, resolve_secret
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _TEMPLATES_DIR = Path(__file__).parent / "_templates"
@@ -63,6 +64,12 @@ def create_app(
     *,
     data_dir: str | os.PathLike[str],
     secret_key: bytes | None = None,
+    store: Store | None = None,
+    mgr: DownloadManager | None = None,
+    streams: StreamRegistry | None = None,
+    auto_fetch: bool = True,
+    keep_query: bool = False,
+    max_bytes: int = 0,
 ) -> FastAPI:
     """Build the FastAPI application for the withcache control plane.
 
@@ -74,6 +81,12 @@ def create_app(
     ``secret_key`` overrides the persisted secret; tests pass a
     stable bytes value so cookies stay valid across the fixture's
     lifetime without touching the disk.
+
+    ``store`` / ``mgr`` / ``streams`` / ``auto_fetch`` let tests
+    inject stubs / capture doubles without spawning the real
+    :class:`DownloadManager` worker thread. The daemon path
+    (``server.main`` post-cut-over) passes real instances via a
+    lifespan hook.
     """
     data_dir_str = str(data_dir)
     Path(data_dir_str).mkdir(parents=True, exist_ok=True)
@@ -103,6 +116,22 @@ def create_app(
     )
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    # Runtime objects the byte-serving handlers reach via
+    # ``request.app.state``. Store writes a real cache.db under
+    # data_dir so tests exercise the SQLite path unchanged. mgr +
+    # streams default to real instances (they don't spawn threads
+    # at construction time; the mgr thread only starts on demand).
+    app.state.store = (
+        store
+        if store is not None
+        else Store(data_dir_str, keep_query=keep_query, max_bytes=max_bytes)
+    )
+    app.state.mgr = mgr if mgr is not None else DownloadManager(app.state.store)
+    app.state.streams = streams if streams is not None else StreamRegistry()
+    app.state.auto_fetch = auto_fetch
+
+    register_api_routes(app)
 
     def render(name: str, request: Request, **ctx: Any) -> HTMLResponse:
         """Render a Jinja template + always-injected context.
