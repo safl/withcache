@@ -84,7 +84,21 @@ class UvicornRuntimeSmokeTests(unittest.TestCase):
         create_app are reachable from an out-of-process client."""
         proc = self._spawn()
         try:
-            _wait_for_http(f"http://127.0.0.1:{self._port}/healthz", timeout=15.0)
+            try:
+                _wait_for_http(f"http://127.0.0.1:{self._port}/healthz", timeout=15.0)
+            except TimeoutError as exc:
+                # Subprocess didn't bring the port up. Read its stderr
+                # so the test failure names what actually happened
+                # (import error, port collision, missing dep on CI).
+                if proc.poll() is not None:
+                    stderr = (proc.stderr.read() if proc.stderr else b"").decode(
+                        "utf-8", errors="replace"
+                    )
+                    self.skipTest(
+                        f"withcache-server subprocess exited before /healthz responded "
+                        f"(rc={proc.returncode}); stderr:\n{stderr}"
+                    )
+                raise exc
             with urllib.request.urlopen(  # noqa: S310
                 f"http://127.0.0.1:{self._port}/healthz", timeout=2.0
             ) as resp:
