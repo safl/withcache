@@ -22,11 +22,9 @@ stay byte-identical:
   the worker with the same credential.
 
 Streaming shape: FastAPI ``StreamingResponse`` with a generator
-that reads chunks from the on-disk blob. The pre-port stdlib
-handler chunked via ``self.wfile.write`` in a loop; the port
-preserves the same 64 KiB read size + the
-:class:`StreamRegistry` progress ticks so the operator dashboard
-shows the same numbers.
+that reads chunks from the on-disk blob at 64 KiB reads;
+:class:`StreamRegistry` ticks progress per chunk so the operator
+Downloads page shows in-flight transfers as they run.
 """
 
 from __future__ import annotations
@@ -68,8 +66,7 @@ def _serve_blob(
 
     Returns 400 when the origin URL couldn't be decoded, 404 (with
     miss recording + optional fetch enqueue) on cache miss, or 200
-    + a StreamingResponse on hit. Same status codes and body shapes
-    the pre-port stdlib handler emitted.
+    + a StreamingResponse on hit.
     """
     if not url:
         return PlainTextResponse("missing url\n", status_code=400)
@@ -83,7 +80,6 @@ def _serve_blob(
     if row is not None and _oras_tag_moved(url, row["sha256"]):
         # Tag re-pushed since we cached it: drop the stale bytes so
         # the miss branch below re-fetches the current content.
-        # Same shape as the pre-port handler.
         store.delete_blob(row["key"])
         row = None
 

@@ -9,10 +9,10 @@ to change without redeploying:
 - :data:`KEY_LOG_LEVEL` -- uvicorn / logging level.
   Env: :data:`ENV_LOG_LEVEL`. Default: ``info``.
 - :data:`KEY_CATALOG_URL_OVERRIDE` is intentionally NOT here --
-  :class:`CatalogState.set_url_override` already persists it to a
-  dedicated ``<data-dir>/catalog_url`` file so it round-trips
-  with the ``env_url`` precedence the pre-port code implemented.
-  Route Settings-page edits through that same helper.
+  :class:`CatalogState.set_url_override` persists it to a dedicated
+  ``<data-dir>/catalog_url`` file the daemon reads at startup, so
+  the Catalog page's Set-URL form remains the single source of
+  truth for that knob.
 
 Resolution order is always **override -> env -> default**, so
 operators can drop an env / systemd-unit config without hunting

@@ -5,8 +5,8 @@
 <div class="alert alert-secondary small mb-3">
     Cache misses recorded on ``/blob`` / ``/b/<b64>/<name>`` requests.
     In auto-fetch mode withcache enqueues a fetch in the background;
-    in curate mode an operator triggers the pull manually. Dismiss +
-    Fetch actions land in the admin-forms follow-up PR.
+    in curate mode an operator triggers the pull manually. Per-row
+    Fetch enqueues the pull; Dismiss removes the recorded miss.
 </div>
 {% endblock %}
 
