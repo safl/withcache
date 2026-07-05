@@ -11,6 +11,8 @@
             <span class="vr"></span>
             <a href="#catalog">Catalog</a>
             <span class="vr"></span>
+            <a href="#warming">Warming</a>
+            <span class="vr"></span>
             <a href="#auth">Auth</a>
         </span>
     </div>
@@ -19,11 +21,17 @@
 
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
-    Effective configuration for this withcache instance. Read-only
-    for this pass; persistent overrides mirror bty + nbdmux's
-    Override / Effective / Default shape and land in the follow-up
-    settings-store PR.
+    Effective configuration for this withcache instance. The
+    Warming card below is form-editable; catalog URL persistence
+    goes through the Catalog page's Set-URL form so the on-disk
+    override file the daemon reads at boot stays the single source
+    of truth.
 </div>
+{% if flash %}
+<div class="alert alert-{{ flash_kind or 'secondary' }} small mb-3">
+    {{ flash }}
+</div>
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -146,6 +154,68 @@
                 {% endif %}
             </tbody>
         </table>
+    </div>
+</div>
+
+<div class="card mb-3" id="warming">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-fire me-1"></i>Warming
+    </div>
+    <div class="card-body small">
+        <p class="text-muted mb-3">
+            Persistent operator overrides for warm-cache knobs. Empty
+            override falls through to the env var; empty env falls
+            through to the shipping default. Set a value here to pin
+            it across restarts.
+        </p>
+        {% if log_level_error %}
+        <div class="alert alert-danger small py-2 mb-3">
+            <i class="bi bi-exclamation-triangle me-1"></i>{{ log_level_error }}
+        </div>
+        {% endif %}
+        <form method="post" action="/admin/settings/warming" class="mb-0">
+            <div class="row g-2 align-items-center">
+                <label for="warming-log-level" class="col-md-3 col-form-label col-form-label-sm">
+                    Log level
+                </label>
+                <div class="col-md-3">
+                    <select id="warming-log-level" name="log_level"
+                            class="form-select form-select-sm">
+                        <option value="">(clear override)</option>
+                        {% for lvl in log_levels %}
+                        <option value="{{ lvl }}"
+                                {% if log_level_override == lvl %}selected{% endif %}>
+                            {{ lvl }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button type="submit" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-save me-1"></i>Save
+                    </button>
+                </div>
+                <div class="col-md-4">
+                    <div class="small text-muted">
+                        Effective: <code>{{ log_level_effective }}</code>
+                        <span class="badge bg-light text-dark border ms-1">
+                            {% if log_level_override %}override
+                            {% elif log_level_env %}env
+                            {% else %}default{% endif %}
+                        </span>
+                        <div class="mt-1">
+                            Env:
+                            {% if log_level_env %}
+                            <code>{{ log_level_env }}</code>
+                            {% else %}
+                            <span class="text-muted">(unset)</span>
+                            {% endif %}
+                            &middot; Default: <code>{{ log_level_default }}</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </form>
     </div>
 </div>
 
