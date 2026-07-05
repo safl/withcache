@@ -2199,6 +2199,20 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
+    """Daemon entry point.
+
+    v0.9.0 (this port): FastAPI + uvicorn. The stdlib
+    ``ThreadingHTTPServer`` + Handler class remain in this module
+    as an escape hatch for the pre-port unit-test fixtures that
+    spin up their own server; the runtime daemon uses
+    ``uvicorn.run`` against :func:`nbdmux._app.create_app`.
+    DownloadManager + background catalog init move to the FastAPI
+    lifespan hook; SIGTERM / SIGINT handling is uvicorn's.
+    """
+    import uvicorn
+
+    from ._app import create_app
+
     ap = argparse.ArgumentParser(description="withcache cache-host")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8081)
@@ -2227,39 +2241,9 @@ def main():
     args = ap.parse_args()
 
     store = Store(args.data_dir, keep_query=args.keep_query, max_bytes=parse_size(args.max_bytes))
-    auth = Auth(resolve_secret(store.data_dir), os.environ.get("WITHCACHE_ADMIN_PASSWORD"))
     mgr = DownloadManager(store, workers=args.workers)
+    auth_password = os.environ.get("WITHCACHE_ADMIN_PASSWORD")
 
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    httpd.store = store  # type: ignore[attr-defined]
-    httpd.auth = auth  # type: ignore[attr-defined]
-    httpd.mgr = mgr  # type: ignore[attr-defined]
-    httpd.auto_fetch = not args.curate  # type: ignore[attr-defined]
-    httpd.streams = StreamRegistry()  # type: ignore[attr-defined]
-    # Catalog state: env pin wins over everything, then the operator
-    # override on disk (set via /admin/catalog_set_url), then the
-    # shipping default (nosi's rolling catalog manifest). Seeded from
-    # the last persisted catalog.toml on disk so a restart doesn't
-    # wipe the cache.
-    env_catalog_url = (os.environ.get("WITHCACHE_CATALOG_URL") or "").strip()
-    catalog_url = env_catalog_url or DEFAULT_CATALOG_URL
-    catalog = CatalogState(
-        url=catalog_url,
-        persist_path=os.path.join(store.data_dir, "catalog.toml"),
-        env_url=env_catalog_url,
-        url_override_path=os.path.join(store.data_dir, "catalog_url"),
-    )
-    catalog.load_persisted()
-    httpd.catalog = catalog  # type: ignore[attr-defined]
-    # If no catalog is persisted yet, kick a single startup fetch
-    # in a daemon thread so the operator has something to look at
-    # without needing to click Refresh on their first visit.
-    # Failures record ``last_error`` in memory; the dashboard row
-    # shows it. Never blocks the serve loop.
-    if not catalog.entries:
-        threading.Thread(
-            target=catalog.fetch_now, name="withcache-catalog-init", daemon=True
-        ).start()
     print(
         f"withcache cache-host on http://{args.host}:{args.port}  "
         f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "
@@ -2267,19 +2251,22 @@ def main():
         f"max_bytes={'unlimited' if not store.max_bytes else human_size(store.max_bytes)})",
         flush=True,
     )
-    if not auth.enabled:
+    if not auth_password:
         print(
             "WARNING: WITHCACHE_ADMIN_PASSWORD not set — operator UI is UNAUTHENTICATED.",
             flush=True,
         )
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nbye", flush=True)
-    finally:
-        # Drain workers on shutdown so the sqlite finalizer warnings
-        # from leaked threads stop appearing on Ctrl-C.
-        mgr.close()
+
+    app = create_app(
+        data_dir=store.data_dir,
+        store=store,
+        mgr=mgr,
+        auto_fetch=not args.curate,
+        keep_query=args.keep_query,
+        max_bytes=parse_size(args.max_bytes),
+        run_lifecycle=True,
+    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
