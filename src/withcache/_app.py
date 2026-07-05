@@ -21,7 +21,11 @@ tests green while this file lands and gets iterated.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
+import threading
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +83,7 @@ def create_app(
     auto_fetch: bool = True,
     keep_query: bool = False,
     max_bytes: int = 0,
+    run_lifecycle: bool = False,
 ) -> FastAPI:
     """Build the FastAPI application for the withcache control plane.
 
@@ -104,11 +109,44 @@ def create_app(
     auth = Auth(secret=secret, password=admin_password)
 
     jinja = _build_jinja(_TEMPLATES_DIR)
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """Start-of-request-cycle wiring for the daemon path.
+
+        Fires only when ``run_lifecycle=True`` (``server.main`` boots
+        uvicorn with this). TestClient callers omit the flag so no
+        background thread or fetch fires from the fixture -- the mgr
+        thread pool still starts at Store construction but that's
+        ``daemon=True`` so process exit reaps it.
+        """
+        if run_lifecycle:
+            # Kick the startup catalog fetch when the on-disk
+            # persisted catalog is empty. Same shape the pre-port
+            # ``server.main`` had; daemon=True so a slow / broken
+            # upstream doesn't block ``uvicorn.run``'s serve loop.
+            if not _app.state.catalog.entries:
+                threading.Thread(
+                    target=_app.state.catalog.fetch_now,
+                    name="withcache-catalog-init",
+                    daemon=True,
+                ).start()
+        try:
+            yield
+        finally:
+            if run_lifecycle:
+                # Drain DownloadManager workers so sqlite finalizer
+                # warnings from leaked threads don't fire on shutdown.
+                with contextlib.suppress(Exception):
+                    _app.state.mgr.close()
+                print("withcache: shut down", file=sys.stderr, flush=True)
+
     app = FastAPI(
         title="withcache",
         version=__version__,
         docs_url=None,
         redoc_url=None,
+        lifespan=_lifespan,
     )
 
     # SessionMiddleware signs a cookie with the same shape (name +
