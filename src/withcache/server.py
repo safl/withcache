@@ -1023,12 +1023,6 @@ def main():
         "--workers", type=int, default=2, help="concurrent background download workers (default: 2)"
     )
     ap.add_argument(
-        "--curate",
-        action="store_true",
-        help="require an operator to approve each pull (default: auto-fetch a "
-        "missed artifact in the background so the next request hits)",
-    )
-    ap.add_argument(
         "--max-bytes",
         default="0",
         help="cap total cached bytes and refuse new fills when full (0 = "
@@ -1040,10 +1034,12 @@ def main():
     mgr = DownloadManager(store, workers=args.workers)
     auth_password = os.environ.get("WITHCACHE_ADMIN_PASSWORD")
 
+    # Since v0.10.0 there is no auto-fetch on miss: the operator
+    # hits Download on /ui/catalog to enqueue a fetch. The daemon
+    # is always in "curate" mode; the --curate flag went with it.
     print(
         f"withcache cache-host on http://{args.host}:{args.port}  "
         f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "
-        f"mode={'curate' if args.curate else 'auto-fetch'}, "
         f"max_bytes={'unlimited' if not store.max_bytes else human_size(store.max_bytes)})",
         flush=True,
     )
@@ -1057,7 +1053,6 @@ def main():
         data_dir=store.data_dir,
         store=store,
         mgr=mgr,
-        auto_fetch=not args.curate,
         keep_query=args.keep_query,
         max_bytes=parse_size(args.max_bytes),
         run_lifecycle=True,

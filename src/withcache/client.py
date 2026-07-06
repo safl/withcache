@@ -214,6 +214,35 @@ def add_catalog_entry(
     )
 
 
+def download_catalog_entry(
+    server: str,
+    name: str,
+    *,
+    force: bool = False,
+    timeout: float = CATALOG_TIMEOUT,
+    password: str | None = None,
+) -> dict[str, Any]:
+    """POST ``/catalog/entries/<name>/download``: enqueue an explicit
+    fetch of the entry's ``src`` into the local cache.
+
+    Since v0.10.0 withcache does no auto-fetch on cache miss, so
+    every downstream consumer (bty flash chain, nbdmux export
+    creation) refuses entries that haven't been downloaded. This is
+    the one-place control.
+
+    ``force=True`` deletes any existing cached bytes first so a
+    corrupted / stale entry can be replaced without a manual
+    intermediate delete. Returns the enqueued job's ``{id, status}``.
+
+    Raises :class:`WithcacheError` on 404 (no such entry) / 400
+    (entry has no fetchable src) / transport failure.
+    """
+    path = f"/catalog/entries/{urllib.parse.quote(name, safe='')}/download"
+    if force:
+        path += "?force=1"
+    return _catalog_request("POST", server, path, timeout=timeout, password=password)
+
+
 def delete_catalog_entry(
     server: str,
     name: str,

@@ -74,7 +74,6 @@ def create_app(
     mgr: DownloadManager | None = None,
     streams: StreamRegistry | None = None,
     catalog: CatalogState | None = None,
-    auto_fetch: bool = True,
     keep_query: bool = False,
     max_bytes: int = 0,
     run_lifecycle: bool = False,
@@ -90,8 +89,8 @@ def create_app(
     stable bytes value so cookies stay valid across the fixture's
     lifetime without touching the disk.
 
-    ``store`` / ``mgr`` / ``streams`` / ``auto_fetch`` let tests
-    inject stubs / capture doubles without spawning the real
+    ``store`` / ``mgr`` / ``streams`` let tests inject stubs /
+    capture doubles without spawning the real
     :class:`DownloadManager` worker thread. :func:`server.main`
     passes real instances at daemon start.
     """
@@ -169,7 +168,6 @@ def create_app(
     )
     app.state.mgr = mgr if mgr is not None else DownloadManager(app.state.store)
     app.state.streams = streams if streams is not None else StreamRegistry()
-    app.state.auto_fetch = auto_fetch
     # Auth object exposed on app.state so :func:`register_api_routes`
     # (which owns the JSON catalog write endpoints) can gate them on
     # ``Authorization: Bearer <pw>``. The UI form + login flow read
@@ -303,15 +301,41 @@ def create_app(
     def ui_catalog(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
         """Catalog view: current URL + env pin + on-disk override
         provenance, plus the entries table. Refresh + Set URL +
-        Add oras + Delete are on the subnav / row forms."""
+        Add oras + Download + Delete are on the subnav / row forms.
+
+        Every entry is enriched with ``downloaded_at`` from the
+        store (or ``None``) + an ``active_job_status`` flag from
+        the DownloadManager so the row's Downloaded pill shows
+        "-" / "queued" / "running" / "cached" without a separate
+        polling round-trip. Same shape ``GET /catalog`` returns to
+        the JSON clients.
+        """
         cs: CatalogState = app.state.catalog
+        store = app.state.store
+        mgr = app.state.mgr
+        # Map url -> latest job status for anything currently
+        # pending / running. Keeps the template cheap: it just
+        # renders a small pill without knowing the pipeline shape.
+        pending: dict[str, str] = {}
+        for job in mgr.list():
+            if job.status in ("queued", "running") and job.url not in pending:
+                pending[job.url] = job.status
+        enriched: list[dict[str, Any]] = []
+        for entry in cs.entries:
+            row = {**entry}
+            fetch_url = entry.get("resolved_src") or entry.get("src") or ""
+            blob = store.get_blob(fetch_url) if fetch_url else None
+            row["downloaded_at"] = blob["fetched_at"] if blob else None
+            row["downloaded_size"] = int(blob["size"]) if blob else None
+            row["active_job_status"] = pending.get(fetch_url)
+            enriched.append(row)
         return render(
             "ui/catalog.html",
             request,
             nav_active="catalog",
             catalog_url=cs.url,
             catalog_env_url=cs.env_url,
-            catalog_entries=cs.entries,
+            catalog_entries=enriched,
             catalog_fetched_at=cs.fetched_at,
             catalog_last_error=cs.last_error,
             catalog_last_info=cs.last_info,
@@ -499,6 +523,36 @@ def create_app(
         ok, msg = app.state.catalog.delete_entry(name or "")
         if not ok:
             app.state.catalog.last_error = msg
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.post("/admin/catalog_download_entry")
+    def ui_admin_catalog_download_entry(
+        name: str = Form(""),
+        force: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        """Form-encoded sibling of ``POST /catalog/entries/{name}/download``.
+
+        Adds an enqueue for the named entry; a truthy ``force`` field
+        drops any existing cached bytes first so the redownload
+        replaces stale content instead of hitting the dedup-on-active
+        branch in :class:`DownloadManager`.
+        """
+        cs: CatalogState = app.state.catalog
+        entry = next((e for e in cs.entries if e.get("name") == (name or "").strip()), None)
+        if entry is None:
+            cs.last_error = f"no catalog entry with name={name!r}"
+            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        fetch_url = entry.get("resolved_src") or entry.get("src") or ""
+        if not fetch_url:
+            cs.last_error = f"catalog entry {name!r} has no ``src`` / ``resolved_src`` to fetch"
+            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        if force.strip().lower() in ("1", "true", "on", "yes"):
+            existing = app.state.store.get_blob(fetch_url)
+            if existing is not None:
+                app.state.store.delete_blob(existing["key"])
+        app.state.mgr.enqueue(fetch_url)
+        cs.last_error = ""
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     return app

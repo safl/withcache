@@ -180,6 +180,73 @@ class AddCatalogEntryTests(_CatalogApiBase):
         self.assertEqual(r.status_code, 409)
 
 
+class DownloadCatalogEntryTests(_CatalogApiBase):
+    """POST /catalog/entries/{name}/download enqueues an explicit
+    fetch of the entry's src via the DownloadManager. Introduced
+    when auto-fetch on cache miss was retired; the operator (or a
+    sibling service) is the one who triggers a download now."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        outer = self
+        self.enqueued: list[str] = []
+
+        class _CaptureMgr:
+            def enqueue(self, url: str, headers: dict[str, str] | None = None):  # type: ignore[no-untyped-def]
+                del headers
+                outer.enqueued.append(url)
+                return type("Job", (), {"id": len(outer.enqueued), "status": "queued"})()
+
+            def list(self):  # noqa: A003 - matching the DownloadManager API
+                return []
+
+        self.app.state.mgr = _CaptureMgr()
+
+    def test_download_enqueues_and_returns_job(self) -> None:
+        self.catalog.entries = [
+            {
+                "name": "demo",
+                "src": "https://example/demo.img.gz",
+                "resolved_src": "https://example/demo.img.gz",
+            }
+        ]
+        r = self.client.post("/catalog/entries/demo/download")
+        self.assertEqual(r.status_code, 202)
+        body = r.json()
+        self.assertEqual(body["name"], "demo")
+        self.assertEqual(body["status"], "queued")
+        self.assertEqual(self.enqueued, ["https://example/demo.img.gz"])
+
+    def test_download_unknown_entry_404s(self) -> None:
+        r = self.client.post("/catalog/entries/does-not-exist/download")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self.enqueued, [])
+
+    def test_download_entry_without_src_400s(self) -> None:
+        # Impossible via the JSON add path (src is required) but a
+        # hand-edited catalog.toml can produce this. Refuse rather
+        # than enqueue an empty URL.
+        self.catalog.entries = [{"name": "demo"}]
+        r = self.client.post("/catalog/entries/demo/download")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.enqueued, [])
+
+    def test_download_prefers_resolved_src(self) -> None:
+        """oras:// entries carry a canonical HTTPS ``resolved_src``
+        (the blob URL the manifest walk produced). The download
+        target must be the resolved URL, not the raw ``oras://``
+        ref, so the fetch worker doesn't have to re-resolve."""
+        self.catalog.entries = [
+            {
+                "name": "demo",
+                "src": "oras://ghcr.io/owner/repo:tag",
+                "resolved_src": "https://ghcr.io/v2/owner/repo/blobs/sha256:abc",
+            }
+        ]
+        self.client.post("/catalog/entries/demo/download")
+        self.assertEqual(self.enqueued, ["https://ghcr.io/v2/owner/repo/blobs/sha256:abc"])
+
+
 class DeleteCatalogEntryTests(_CatalogApiBase):
     def test_delete_removes_entry(self) -> None:
         self.catalog.entries = [{"name": "demo", "src": "https://example/demo.img.gz"}]
