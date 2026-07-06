@@ -170,6 +170,12 @@ def create_app(
     app.state.mgr = mgr if mgr is not None else DownloadManager(app.state.store)
     app.state.streams = streams if streams is not None else StreamRegistry()
     app.state.auto_fetch = auto_fetch
+    # Auth object exposed on app.state so :func:`register_api_routes`
+    # (which owns the JSON catalog write endpoints) can gate them on
+    # ``Authorization: Bearer <pw>``. The UI form + login flow read
+    # ``auth`` from this closure directly, but the register-routes
+    # pattern doesn't have the closure, so app.state is the bridge.
+    app.state.auth = auth
     # CatalogState resolution: env pin wins over on-disk override,
     # on-disk override wins over the shipping default (nosi's rolling
     # catalog manifest). ``load_persisted`` seeds entries from the

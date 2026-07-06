@@ -32,11 +32,12 @@ from __future__ import annotations
 import base64
 import urllib.parse
 from collections.abc import Iterator
+from typing import Any
 
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-from .server import CHUNK, StreamRegistry, _oras_tag_moved
+from .server import CHUNK, CatalogState, StreamRegistry, _oras_tag_moved, _serialise_catalog
 
 
 def _decode_blob_origin(path: str, query: str) -> str:
@@ -176,3 +177,154 @@ def register_api_routes(app: FastAPI) -> None:
         del name
         url = _decode_blob_origin(f"/b/{token}/x", "")
         return _serve_blob(request, url, head_only=True)
+
+    # ---------- Catalog JSON API -----------------------------------------
+    #
+    # Bty consumes the catalog through these endpoints: withcache is the
+    # single source of truth for what images exist. Read is open (mirrors
+    # /blob's LAN-only trust model); writes gate on the same Bearer
+    # pattern nbdmux uses -- an ``Authorization: Bearer <pw>`` header
+    # whose value matches ``$WITHCACHE_ADMIN_PASSWORD``, or a session
+    # cookie for browser-based operators.
+
+    def _bearer_or_session_authed(request: Request) -> None:
+        """Auth dependency for catalog writes.
+
+        - No password configured -> open (single-tenant LAN deploy).
+        - Session cookie present -> OK (browser path).
+        - Matching Bearer token -> OK (service-to-service path;
+          bty reads ``$WITHCACHE_ADMIN_PASSWORD`` and posts it).
+        - Otherwise -> 401.
+        """
+        auth = request.app.state.auth
+        if not auth.enabled:
+            return
+        # Session cookie check -- Starlette's SessionMiddleware
+        # stores the flag under ``withcache_authed`` in
+        # ``request.session``. Mirrors the flag ``_app.py`` sets.
+        if request.session.get("withcache_authed"):
+            return
+        header = request.headers.get("Authorization") or ""
+        if header.startswith("Bearer ") and auth.check_bearer(header[len("Bearer ") :]):
+            return
+        raise HTTPException(status_code=401, detail="auth required")
+
+    @app.get("/catalog")
+    def list_catalog(request: Request) -> JSONResponse:
+        """Return the current catalog as JSON.
+
+        Open route: bty polls this from a sibling container without a
+        session (mirrors the ``/blob`` byte-serving surface's trust
+        model -- LAN-only, no auth on reads). Returns a snapshot of
+        the in-process ``CatalogState.entries`` plus provenance
+        metadata (URL, env pin, fetch timestamps) so clients can
+        detect staleness. No pagination -- the catalog is small
+        (dozens of entries at most).
+        """
+        cs: CatalogState = request.app.state.catalog
+        return JSONResponse(
+            {
+                "url": cs.url,
+                "env_url": cs.env_url,
+                "fetched_at": cs.fetched_at,
+                "last_error": cs.last_error,
+                "entries": [dict(e) for e in cs.entries],
+            }
+        )
+
+    @app.post("/catalog/entries", status_code=201)
+    def add_catalog_entry(
+        body: dict[str, Any],
+        request: Request,
+        _auth: None = Depends(_bearer_or_session_authed),
+    ) -> JSONResponse:
+        """Insert one catalog entry.
+
+        Body: ``{"name": "...", "src": "...", "format?", "arch?",
+        "sha256?", "size_bytes?", "resolved_src?", "description?"}``.
+        Only ``src`` is required; every other field is optional and
+        gets persisted through the ``catalog.toml`` round-trip.
+
+        409 when an entry with the same ``name`` already exists;
+        rejecting on duplicate name (not src) because the display
+        surface keys on name and two rows with the same name would
+        collide on the /ui/catalog table.
+
+        Rejects any unknown top-level key -- the emitter allowlists
+        keys anyway, but failing loud at the API boundary saves the
+        operator from wondering why their ``notes`` field vanished.
+        """
+        allowed = {
+            "name",
+            "src",
+            "resolved_src",
+            "format",
+            "arch",
+            "sha256",
+            "size_bytes",
+            "description",
+        }
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be a JSON object")
+        unknown = set(body.keys()) - allowed
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown key(s) {sorted(unknown)}; allowed: {sorted(allowed)}",
+            )
+        name = body.get("name")
+        src = body.get("src")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="name: non-empty string required")
+        if not isinstance(src, str) or not src.strip():
+            raise HTTPException(status_code=400, detail="src: non-empty string required")
+
+        cs: CatalogState = request.app.state.catalog
+        if any(e.get("name") == name for e in cs.entries):
+            raise HTTPException(
+                status_code=409,
+                detail=f"catalog entry with name={name!r} already exists",
+            )
+        entry = {k: v for k, v in body.items() if v is not None and v != ""}
+        cs.entries.append(entry)
+        _persist_catalog(cs)
+        return JSONResponse(entry, status_code=201)
+
+    @app.delete("/catalog/entries", status_code=204)
+    def delete_catalog_entry(
+        request: Request,
+        name: str | None = None,
+        _auth: None = Depends(_bearer_or_session_authed),
+    ) -> Response:
+        """Delete via ``?name=<name>`` query param (URL-safe;
+        avoids path-encoding TOML entry names).
+
+        204 on success. 404 when no entry with that name exists.
+        """
+        if not name or not name.strip():
+            raise HTTPException(status_code=400, detail="name: query param required")
+        cs: CatalogState = request.app.state.catalog
+        original = list(cs.entries)
+        cs.entries = [e for e in cs.entries if e.get("name") != name]
+        if len(cs.entries) == len(original):
+            raise HTTPException(
+                status_code=404,
+                detail=f"no catalog entry with name={name!r}",
+            )
+        _persist_catalog(cs)
+        return Response(status_code=204)
+
+
+def _persist_catalog(cs: CatalogState) -> None:
+    """Write the current in-memory catalog back to
+    ``<data_dir>/catalog.toml`` (when ``persist_path`` is set).
+
+    Silent no-op when ``persist_path`` is ``None`` -- tests inject
+    a stub CatalogState without disk backing and still exercise
+    the in-memory mutation."""
+    if cs.persist_path is None:
+        return
+    from pathlib import Path
+
+    Path(cs.persist_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(cs.persist_path).write_bytes(_serialise_catalog(cs.entries))
