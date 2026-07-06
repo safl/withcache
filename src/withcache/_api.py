@@ -37,7 +37,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
-from .server import CHUNK, CatalogState, StreamRegistry, _oras_tag_moved, _serialise_catalog
+from .server import CHUNK, CatalogState, _oras_tag_moved, _serialise_catalog
 
 
 def _decode_blob_origin(path: str, query: str) -> str:
@@ -78,7 +78,6 @@ def _serve_blob(
         return PlainTextResponse("missing url\n", status_code=400)
 
     store = request.app.state.store
-    streams: StreamRegistry = request.app.state.streams
 
     row = store.get_blob(url)
     if row is not None and _oras_tag_moved(url, row["sha256"]):
@@ -105,35 +104,20 @@ def _serve_blob(
 
     if head_only:
         # No body; the shim's HEAD probe doesn't count as a served
-        # download so record_hit + stream registration are skipped.
+        # download so record_hit is skipped.
         return Response(status_code=200, media_type=media_type, headers=headers)
 
     store.record_hit(row["key"])
-    client = f"{request.client.host}:{request.client.port}" if request.client else "unknown"
-    stream = streams.start(url=url, client=client, total=row["size"])
 
     def _chunks() -> Iterator[bytes]:
         """Read the blob in 64 KiB chunks. StreamingResponse iterates
-        this + writes each chunk to the client. Progress ticks fire
-        every :data:`StreamRegistry.PROGRESS_STRIDE` chunks so the
-        dashboard's 1 Hz refresh sees updates without lock-contention
-        on a busy box."""
-        sent = 0
-        ticks = 0
-        try:
-            with open(path, "rb") as f:
-                while True:
-                    chunk = f.read(CHUNK)
-                    if not chunk:
-                        break
-                    yield chunk
-                    sent += len(chunk)
-                    ticks += 1
-                    if ticks % StreamRegistry.PROGRESS_STRIDE == 0:
-                        streams.bump(stream.id, sent)
-                streams.bump(stream.id, sent)
-        finally:
-            streams.finish(stream.id)
+        this + writes each chunk to the client."""
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(CHUNK)
+                if not chunk:
+                    break
+                yield chunk
 
     return StreamingResponse(_chunks(), media_type=media_type, headers=headers)
 

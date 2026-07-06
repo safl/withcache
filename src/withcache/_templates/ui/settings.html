@@ -4,14 +4,14 @@
 {% block subnav %}
 <nav class="navbar subnav-strip" aria-label="Section sub-navigation">
     <div class="container">
-        <span class="d-flex align-items-center flex-wrap">
+        <span class="subnav-jumps d-flex align-items-center flex-wrap">
             <a href="#identity">Identity</a>
             <span class="vr"></span>
             <a href="#paths">Storage paths</a>
             <span class="vr"></span>
             <a href="#catalog">Catalog</a>
             <span class="vr"></span>
-            <a href="#warming">Warming</a>
+            <a href="#logging">Logging</a>
             <span class="vr"></span>
             <a href="#auth">Auth</a>
         </span>
@@ -22,7 +22,7 @@
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
     Effective configuration for this withcache instance. The
-    Warming card below is form-editable; catalog URL persistence
+    Logging card below is form-editable; catalog URL persistence
     goes through the Catalog page's Set-URL form so the on-disk
     override file the daemon reads at boot stays the single source
     of truth.
@@ -157,29 +157,29 @@
     </div>
 </div>
 
-<div class="card mb-3" id="warming">
+<div class="card mb-3" id="logging">
     <div class="card-header bg-light fw-semibold py-2">
-        <i class="bi bi-fire me-1"></i>Warming
+        <i class="bi bi-terminal me-1"></i>Logging
     </div>
     <div class="card-body small">
         <p class="text-muted mb-3">
-            Persistent operator overrides for warm-cache knobs. Empty
-            override falls through to the env var; empty env falls
-            through to the shipping default. Set a value here to pin
-            it across restarts.
+            Persistent operator override for the uvicorn log level.
+            Empty override falls through to the env var; empty env
+            falls through to the shipping default. Set a value here
+            to pin it across restarts.
         </p>
         {% if log_level_error %}
         <div class="alert alert-danger small py-2 mb-3">
             <i class="bi bi-exclamation-triangle me-1"></i>{{ log_level_error }}
         </div>
         {% endif %}
-        <form method="post" action="/admin/settings/warming" class="mb-0">
+        <form method="post" action="/admin/settings/logging" class="mb-0">
             <div class="row g-2 align-items-center">
-                <label for="warming-log-level" class="col-md-3 col-form-label col-form-label-sm">
+                <label for="logging-log-level" class="col-md-3 col-form-label col-form-label-sm">
                     Log level
                 </label>
                 <div class="col-md-3">
-                    <select id="warming-log-level" name="log_level"
+                    <select id="logging-log-level" name="log_level"
                             class="form-select form-select-sm">
                         <option value="">(clear override)</option>
                         {% for lvl in log_levels %}

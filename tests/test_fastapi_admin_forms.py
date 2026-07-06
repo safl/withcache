@@ -173,9 +173,7 @@ class DownloadActionTests(_AdminBase):
             follow_redirects=False,
         )
         # Still only one entry with that name; no duplicate.
-        matching = [
-            e for e in self.app.state.catalog.entries if e.get("name") == "already-there"
-        ]
+        matching = [e for e in self.app.state.catalog.entries if e.get("name") == "already-there"]
         self.assertEqual(len(matching), 1)
         # Download WAS enqueued.
         self.assertEqual(len(self.mgr_calls), 1)

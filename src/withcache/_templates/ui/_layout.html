@@ -3,12 +3,12 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block title %}nbdmux{% endblock %}</title>
+    <title>{% block title %}withcache{% endblock %}</title>
     <link rel="stylesheet" href="/static/bootstrap.min.css">
     <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
     <style>
         /* Palette anchor for the three-service trio (bty navy,
-           withcache dark-magenta, nbdmux magenta). Nbdmux takes the
+           withcache dark-magenta, nbdmux magenta). Withcache takes the
            dark-magenta middle of the gradient so the three consoles read as
            one product family. Overriding Bootstrap's ``--bs-primary``
            re-tints stock components without patching the css bundle. */
@@ -216,14 +216,13 @@
             </div>
             <span class="navbar-version me-2">v{{ version }}</span>
             <div class="user-bar mt-2 mt-md-0">
-                {# Operator name doubles as the Account link (change-
-                   password form); Logout sits beside it, separated by
-                   a thin divider. Same shape as bty. #}
-                <a href="/ui/account"
-                   class="user-bar-name user-bar-action {% if nav_active == 'account' %}active{% endif %}">
+                {# Operator badge (name-only, no /ui/account page); Logout
+                   sits beside it, separated by a thin divider. Same
+                   shape as bty. #}
+                <span class="user-bar-name">
                     <i class="bi bi-person-circle"></i>
                     <code>operator</code>
-                </a>
+                </span>
                 <span class="user-bar-divider"></span>
                 <form action="/ui/logout" method="post" class="m-0 d-inline-flex">
                     <button type="submit" class="user-bar-action user-bar-logout" title="Sign out">
