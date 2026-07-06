@@ -65,39 +65,36 @@ def _serve_blob(
 ) -> Response:
     """Shared implementation for GET and HEAD blob requests.
 
-    Returns 400 when the origin URL couldn't be decoded, 404 (with
-    miss recording + optional fetch enqueue) on cache miss, or 200
-    + a StreamingResponse on hit.
+    Returns 400 when the origin URL couldn't be decoded, 404 on
+    cache miss (with a hint pointing at ``POST /catalog/entries/
+    {name}/download``), or 200 + a StreamingResponse on hit.
+
+    Since v0.10.0 there is no auto-fetch on miss: the operator
+    picks explicitly what to download on withcache's /ui/catalog
+    page. A miss here is either "not downloaded yet" (operator
+    action needed) or "hit an unlisted URL" (bug in the caller).
     """
     if not url:
         return PlainTextResponse("missing url\n", status_code=400)
 
     store = request.app.state.store
-    mgr = request.app.state.mgr
-    auto_fetch: bool = request.app.state.auto_fetch
     streams: StreamRegistry = request.app.state.streams
 
     row = store.get_blob(url)
     if row is not None and _oras_tag_moved(url, row["sha256"]):
-        # Tag re-pushed since we cached it: drop the stale bytes so
-        # the miss branch below re-fetches the current content.
+        # Tag re-pushed since we cached it: drop the stale bytes.
+        # The miss branch below turns this into a 404 the operator
+        # resolves by hitting Download / Redownload on /ui/catalog.
         store.delete_blob(row["key"])
         row = None
 
     if row is None:
         store.record_miss(url)
-        if auto_fetch and store.has_capacity():
-            # Forward the client's Authorization header onto the
-            # worker so a token-gated origin (fresh OCI bearer from
-            # bty at catalog import time) can be fetched. Narrow
-            # allowlist: Authorization only; /admin/fetch carries
-            # its own ``headers=`` payload for the curated path.
-            fwd_headers: dict[str, str] | None = None
-            auth_header = request.headers.get("Authorization")
-            if auth_header:
-                fwd_headers = {"Authorization": auth_header}
-            mgr.enqueue(url, headers=fwd_headers)
-        return PlainTextResponse("cache miss (recorded)\n", status_code=404)
+        return PlainTextResponse(
+            "cache miss: this URL hasn't been downloaded yet. "
+            "Pick the matching catalog entry on /ui/catalog and hit Download.\n",
+            status_code=404,
+        )
 
     path = store.blob_path(row["key"])
     headers = {
@@ -218,17 +215,29 @@ def register_api_routes(app: FastAPI) -> None:
         model -- LAN-only, no auth on reads). Returns a snapshot of
         the in-process ``CatalogState.entries`` plus provenance
         metadata (URL, env pin, fetch timestamps) so clients can
-        detect staleness. No pagination -- the catalog is small
-        (dozens of entries at most).
+        detect staleness. Every entry is enriched with a
+        ``downloaded_at`` field (or ``None``) so nbdmux + bty can
+        filter to only-downloaded entries without a second call. No
+        pagination -- the catalog is small (dozens of entries at
+        most).
         """
         cs: CatalogState = request.app.state.catalog
+        store = request.app.state.store
+        entries_out: list[dict[str, Any]] = []
+        for e in cs.entries:
+            enriched = dict(e)
+            fetch_url = e.get("resolved_src") or e.get("src") or ""
+            row = store.get_blob(fetch_url) if fetch_url else None
+            enriched["downloaded_at"] = row["fetched_at"] if row else None
+            enriched["downloaded_size"] = int(row["size"]) if row else None
+            entries_out.append(enriched)
         return JSONResponse(
             {
                 "url": cs.url,
                 "env_url": cs.env_url,
                 "fetched_at": cs.fetched_at,
                 "last_error": cs.last_error,
-                "entries": [dict(e) for e in cs.entries],
+                "entries": entries_out,
             }
         )
 
@@ -289,6 +298,53 @@ def register_api_routes(app: FastAPI) -> None:
         cs.entries.append(entry)
         _persist_catalog(cs)
         return JSONResponse(entry, status_code=201)
+
+    @app.post("/catalog/entries/{name}/download", status_code=202)
+    def download_catalog_entry(
+        name: str,
+        request: Request,
+        _auth: None = Depends(_bearer_or_session_authed),
+    ) -> JSONResponse:
+        """Fetch the entry's bytes into the local cache.
+
+        Since v0.10.0 auto-fetch on cache miss is gone: the operator
+        picks explicitly what to download. Nbdmux + bty's flash
+        chain both refuse to hand out /b/<url> URLs for entries
+        that haven't been downloaded, so this is the one-place
+        control for "make it servable."
+
+        Idempotent: enqueuing an entry that already has a live
+        download returns the existing job. Force-refetch is
+        ``POST /catalog/entries/{name}/download?force=1``.
+        """
+        cs: CatalogState = request.app.state.catalog
+        mgr = request.app.state.mgr
+        store = request.app.state.store
+
+        entry = next((e for e in cs.entries if e.get("name") == name), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"no catalog entry with name={name!r}")
+        fetch_url = entry.get("resolved_src") or entry.get("src") or ""
+        if not fetch_url:
+            raise HTTPException(
+                status_code=400,
+                detail=f"catalog entry {name!r} has no ``src`` / ``resolved_src`` to fetch",
+            )
+        force = request.query_params.get("force") in ("1", "true", "yes")
+        if force:
+            existing = store.get_blob(fetch_url)
+            if existing is not None:
+                store.delete_blob(existing["key"])
+        job = mgr.enqueue(fetch_url)
+        return JSONResponse(
+            {
+                "name": name,
+                "src": fetch_url,
+                "job_id": job.id,
+                "status": job.status,
+            },
+            status_code=202,
+        )
 
     @app.delete("/catalog/entries", status_code=204)
     def delete_catalog_entry(

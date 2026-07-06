@@ -116,7 +116,8 @@
                     <th>Source</th>
                     <th>Format</th>
                     <th>SHA-256</th>
-                    <th class="text-end" style="width: 1%; white-space: nowrap;">Action</th>
+                    <th title="When withcache last fetched this entry's bytes to disk. bty's flash chain + nbdmux's export creation both refuse entries with no timestamp here.">Downloaded</th>
+                    <th class="text-end" style="width: 1%; white-space: nowrap;">Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -137,8 +138,45 @@
                     <td class="small font-monospace">
                         {% if e.get('sha256') %}{{ e.sha256[:12] }}...{% else %}<span class="text-muted">-</span>{% endif %}
                     </td>
+                    <td class="small">
+                        {% if e.get('active_job_status') %}
+                        <span class="badge bg-info text-dark" title="Download in flight">
+                            <i class="bi bi-arrow-down-circle me-1"></i>{{ e.active_job_status }}
+                        </span>
+                        {% elif e.get('downloaded_at') %}
+                        <span class="badge bg-success" title="{{ e.downloaded_at }}">
+                            <i class="bi bi-check-circle me-1"></i>cached
+                        </span>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
                     <td class="text-end text-nowrap">
-                        <form method="post" action="/admin/catalog_delete_entry" class="d-inline m-0"
+                        {# Download / Redownload: enqueue an explicit fetch
+                           of this entry's src into the local cache. The
+                           button label switches on ``downloaded_at`` so
+                           the operator sees whether the click will fill
+                           an empty slot or replace stale bytes. #}
+                        <form method="post" action="/admin/catalog_download_entry"
+                              class="d-inline m-0">
+                            <input type="hidden" name="name" value="{{ e.get('name', '') }}">
+                            {% if e.get('downloaded_at') %}
+                            <input type="hidden" name="force" value="1">
+                            <button type="submit" class="btn btn-sm btn-outline-primary"
+                                    title="Delete the cached bytes and refetch from origin"
+                                    {% if e.get('active_job_status') %}disabled{% endif %}>
+                                <i class="bi bi-arrow-repeat"></i> Redownload
+                            </button>
+                            {% else %}
+                            <button type="submit" class="btn btn-sm btn-primary"
+                                    title="Fetch this entry's bytes into the local cache"
+                                    {% if e.get('active_job_status') %}disabled{% endif %}>
+                                <i class="bi bi-download"></i> Download
+                            </button>
+                            {% endif %}
+                        </form>
+                        <form method="post" action="/admin/catalog_delete_entry"
+                              class="d-inline m-0"
                               onsubmit="return confirm('Delete catalog entry {{ e.get('name', '') }}?');">
                             <input type="hidden" name="name" value="{{ e.get('name', '') }}">
                             <button type="submit" class="btn btn-sm btn-outline-danger"
@@ -150,7 +188,7 @@
                 </tr>
                 {% endfor %}
                 {% if not catalog_entries %}
-                <tr><td colspan="5" class="text-muted text-center py-3">
+                <tr><td colspan="6" class="text-muted text-center py-3">
                     No catalog entries yet. The startup fetch will populate
                     this list; failures land in the source card above.
                 </td></tr>

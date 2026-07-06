@@ -172,51 +172,26 @@ class BlobHeadTests(_BlobBase):
         self.assertEqual(r.status_code, 200)
 
 
-class BlobMissAutoFetchTests(_BlobBase):
-    def test_miss_enqueues_on_auto_fetch(self) -> None:
-        url = "https://example.invalid/enqueue.bin"
-        self.client.get("/blob", params={"url": url})
-        self.assertEqual(len(self.enqueue_calls), 1)
-        self.assertEqual(self.enqueue_calls[0][0], url)
+class BlobMissTests(_BlobBase):
+    """Since v0.10.0 auto-fetch on miss is gone. A miss records the
+    request-count against the misses table (for the operator's
+    /ui/misses page) and returns 404 with a hint pointing at the
+    /ui/catalog Download button; no enqueue fires."""
 
-    def test_miss_forwards_authorization_header(self) -> None:
-        url = "https://example.invalid/token-gated.bin"
-        self.client.get(
-            "/blob",
-            params={"url": url},
-            headers={"Authorization": "Bearer xyz123"},
-        )
-        self.assertEqual(len(self.enqueue_calls), 1)
-        _, headers = self.enqueue_calls[0]
-        self.assertIsNotNone(headers)
-        self.assertEqual(headers["Authorization"], "Bearer xyz123")
-
-    def test_miss_no_authorization_no_headers_forwarded(self) -> None:
-        self.client.get("/blob", params={"url": "https://example.invalid/anon.bin"})
-        self.assertEqual(self.enqueue_calls[0][1], None)
-
-
-class BlobAutoFetchOffTests(_BlobBase):
-    def setUp(self) -> None:
-        super().setUp()
-        self.client.close()
-        outer = self
-
-        class _CaptureMgr:
-            def enqueue(self, url: str, headers: dict[str, str] | None = None) -> None:
-                outer.enqueue_calls.append((url, headers))
-
-        self.app = create_app(
-            data_dir=self._tmpdir + "-curate",
-            secret_key=TEST_SECRET,
-            mgr=_CaptureMgr(),
-            auto_fetch=False,
-        )
-        self.client = TestClient(self.app, follow_redirects=False)
-
-    def test_miss_records_but_does_not_enqueue(self) -> None:
+    def test_miss_records_but_never_enqueues(self) -> None:
         pre = len(self.enqueue_calls)
         r = self.client.get("/blob", params={"url": "https://example.invalid/curated.bin"})
+        self.assertEqual(r.status_code, 404)
+        self.assertIn("Download", r.text)
+        self.assertEqual(len(self.enqueue_calls), pre)
+
+    def test_miss_with_authorization_header_still_never_enqueues(self) -> None:
+        pre = len(self.enqueue_calls)
+        r = self.client.get(
+            "/blob",
+            params={"url": "https://example.invalid/token-gated.bin"},
+            headers={"Authorization": "Bearer xyz123"},
+        )
         self.assertEqual(r.status_code, 404)
         self.assertEqual(len(self.enqueue_calls), pre)
 
