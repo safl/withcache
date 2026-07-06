@@ -23,21 +23,23 @@ Artifacts are cached **by their origin URL as a key**; the shim opts in by
 re-pointing the URL at the cache. No transparent proxy, no TLS interception, no
 client CA. The URL is a lookup key, not a connection target.
 
-By default a miss is **auto-fetched**: the request falls through to origin (so
-the caller gets its file straight away), and the cache-host pulls the same
-artifact in the background, so the next request hits. Run with **`--curate`** to
-require a human instead, who reviews the miss list in a small web UI and presses
-**Download** (or pre-seeds via the Downloads-page **Fetch** form). Either way the cache-host is the
-only box that needs internet egress (and any vendor credentials), and clients
-never write to it.
+A miss falls through to origin (the caller gets its file straight away) and
+withcache records the miss on the operator's **`/ui/misses`** page. The operator
+reviews the miss list, picks what's worth caching, and one click **Fetch**s a URL
+into the catalog + downloads it. Every entry in the catalog is a byte-perfect
+copy of the origin at the time the operator hit Download; subsequent requests
+hit the local cache. The cache-host is the only box that needs internet egress
+(and any vendor credentials); clients never write to it.
 
 ## Why not just curl + a caching proxy?
 
 For `https://` (i.e. every vendor download) a forward proxy can't cache without
 **SSL-bump / MITM**: curl tunnels TLS end-to-end via `CONNECT`, so the proxy
 only sees ciphertext. The shim sidesteps that entirely by *re-pointing the URL*
-to the cache instead of intercepting the connection. And no proxy offers the
-optional **operator-curated** model (`--curate`: a miss queue a human approves).
+to the cache instead of intercepting the connection. And a proxy that
+auto-fetches everything a client asks for isn't what you want in a lab; the
+**operator-curated** model here means only bytes the operator chose live on
+disk.
 
 ## Components
 
@@ -94,9 +96,8 @@ WITHCACHE_ADMIN_PASSWORD=change-me withcache-server --data-dir ./data --port 808
 Data (blobs + `cache.db` + `session-secret`) lives in the `/data` volume (or
 `--data-dir`). Artifacts are immutable per version, so there's no cache
 invalidation. `--workers N` sets the number of concurrent download workers,
-`--curate` switches from auto-fetch to operator-approved pulls, and `--max-bytes`
-(e.g. `50G`) caps the cache: when full it refuses new fills (no auto-eviction),
-and you free space by deleting artifacts in the UI.
+`--max-bytes` (e.g. `50G`) caps the cache: when full it refuses new fills (no
+auto-eviction), and you free space by deleting artifacts in the UI.
 
 ## Use the shims (transparent `curl` / `wget`)
 
@@ -224,7 +225,7 @@ offline; matches bty's chrome for a consistent trio) is a five-page dashboard:
 - **Cached** (landing): URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at, each with **Delete** to free space.
 - **Streams**: in-flight stream-through-and-store fetches serving bytes to a client while writing to disk.
 - **Downloads**: live progress bars, `queued/running/completed/cancelled/failed`, **Cancel**, and **Clear finished**. Downloads run in a background worker pool, not in the request, so large pulls never block, modelled on [bty]'s job managers. The subnav Fetch form pre-seeds an artifact before anyone misses it.
-- **Misses**: auto-fetched by default, or (under `--curate`) each with **Download** (queues a background pull) and **Dismiss**.
+- **Misses**: URLs clients asked for that aren't downloaded yet. Each with **Fetch** (promotes to a catalog entry AND downloads it) and **Dismiss** (forget it).
 - **Catalog**: image catalog fetched from a nosi-style `catalog.toml` (URL configurable via `$WITHCACHE_CATALOG_URL` or the subnav Set&fetch input); pre-seed by URL via the "Add image from oras" input.
 
 ## Auth
@@ -265,10 +266,10 @@ url = client.serve_url("http://cache:8081", origin) or origin
 ```
 
 `is_cached()` is a graceful `HEAD` (a miss, timeout, or unreachable cache all
-return `False`, so you fall back to the origin), and it doubles as a warm-up:
-the probe records the miss and, in auto-fetch mode, enqueues the fill, so the
-next call flips to the cache. The encoding is shared with the shims and server,
-so consumers stay in lockstep with the cache-host.
+return `False`, so you fall back to the origin). Since v0.10.0 a miss is
+recorded on the cache-host's `/ui/misses` page but no background fetch fires
+-- the operator explicitly chooses what to Download. The encoding is shared
+with the shims and server, so consumers stay in lockstep with the cache-host.
 
 ### Pull an `oras://` artifact (oras + client together)
 

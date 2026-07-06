@@ -79,20 +79,16 @@ def is_cached(
     timeout: float = PROBE_TIMEOUT,
     headers: dict[str, str] | None = None,
 ) -> bool:
-    """True if the cache-host already holds ``origin`` (a ``HEAD`` on ``/b/``
-    returns 200). A miss (404), an unreachable host, a timeout, or any error
-    returns False, so a caller can safely fall back to the origin. The HEAD
-    also *warms* an auto-fetch cache-host: the miss is recorded and the
-    background fill enqueued, so a later probe flips to cached.
+    """True if the cache-host already holds ``origin`` (a ``HEAD`` on
+    ``/b/`` returns 200). A miss (404), an unreachable host, a
+    timeout, or any error returns False, so a caller can safely fall
+    back to the origin.
 
-    ``headers`` (optional) attaches request headers to the HEAD. The
-    cache-host forwards a client-supplied ``Authorization`` into its
-    background-fetch worker, so a consumer that has just minted an OCI
-    bearer (the typical use case: bty resolving an ``oras://`` catalog
-    entry to a ``ghcr.io`` blob URL at import time) can warm the cache
-    against that token-gated origin in one probe. Other entries in
-    ``headers`` round-trip the same way; only ``Authorization`` is
-    forwarded into the fetch on the server side.
+    Since v0.10.0 the miss is recorded on the cache-host (surfaced
+    on ``/ui/misses`` for the operator) but no background fetch is
+    triggered -- the operator explicitly Downloads. ``headers`` is
+    still forwarded on the HEAD so a token-gated origin can be
+    probed if the operator's about to add it to the catalog.
     """
     req = urllib.request.Request(blob_url(server, origin), method="HEAD")
     if headers:
@@ -102,7 +98,7 @@ def is_cached(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return bool(resp.status == 200)
     except urllib.error.HTTPError:
-        return False  # 404 miss (now recorded + enqueued by the cache-host)
+        return False  # 404 miss (recorded on the cache-host's /ui/misses)
     except (urllib.error.URLError, OSError):
         return False  # unreachable / timeout -> caller serves the origin itself
 
