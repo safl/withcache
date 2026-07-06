@@ -85,21 +85,90 @@
                 {% endif %}
             </div>
         </form>
-        {# Add oras: append a fresh oras:// entry to the in-memory
-           catalog. Useful for one-off pulls that aren't in the
-           upstream manifest. #}
+        {# Add oras: append a fresh oras:// entry. The manifest walk
+           populates sha256/format/size from the registry so the
+           operator doesn't have to type them. #}
         <form method="post" action="/admin/catalog_add_oras" class="mt-2 mb-0">
             <label for="catalog-add-oras-input" class="form-label small mb-1">
-                Add oras:// entry
+                Add oras:// entry (registry auto-resolves)
             </label>
             <div class="d-flex gap-2">
                 <input type="text" class="form-control form-control-sm font-monospace"
                        id="catalog-add-oras-input" name="url" required
                        placeholder="oras://ghcr.io/owner/repo:tag">
                 <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">
-                    <i class="bi bi-plus-circle me-1"></i>Add
+                    <i class="bi bi-plus-circle me-1"></i>Add oras
                 </button>
             </div>
+        </form>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-header bg-light fw-semibold py-2">
+        <i class="bi bi-plus-square me-1"></i>Add HTTPS entry
+    </div>
+    <div class="card-body small">
+        <p class="text-muted mb-2">
+            Add one https:// catalog entry. Operators typically fill
+            <em>name</em>, <em>src</em>, and <em>sha256</em>; other
+            fields are optional. For <em>oras://</em> entries use the
+            form above instead (the registry walk fills sha256 /
+            format / size automatically).
+        </p>
+        <form method="post" action="/admin/catalog_add_entry" class="mb-0">
+            <div class="row g-2 mb-2">
+                <div class="col-md-4">
+                    <label class="form-label small mb-1" for="ce-name">Name</label>
+                    <input type="text" class="form-control form-control-sm"
+                           id="ce-name" name="name" required
+                           placeholder="my-appliance-2026.W28">
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label small mb-1" for="ce-src">Source URL</label>
+                    <input type="url" class="form-control form-control-sm font-monospace"
+                           id="ce-src" name="src" required
+                           placeholder="https://example.com/appliance.img.gz">
+                </div>
+            </div>
+            <div class="row g-2 mb-2">
+                <div class="col-md-6">
+                    <label class="form-label small mb-1" for="ce-sha256">SHA-256</label>
+                    <input type="text" class="form-control form-control-sm font-monospace"
+                           id="ce-sha256" name="sha256"
+                           pattern="[0-9a-fA-F]{64}"
+                           placeholder="64-hex, e.g. abcdef0123... (leave blank if unknown)">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small mb-1" for="ce-format">Format</label>
+                    <input type="text" class="form-control form-control-sm"
+                           id="ce-format" name="format"
+                           placeholder="img.gz | img.zst | qcow2">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small mb-1" for="ce-arch">Arch</label>
+                    <input type="text" class="form-control form-control-sm"
+                           id="ce-arch" name="arch"
+                           placeholder="x86_64 | aarch64">
+                </div>
+            </div>
+            <div class="row g-2 mb-2">
+                <div class="col-md-4">
+                    <label class="form-label small mb-1" for="ce-size">Size (bytes)</label>
+                    <input type="number" min="0" class="form-control form-control-sm"
+                           id="ce-size" name="size_bytes"
+                           placeholder="optional">
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label small mb-1" for="ce-desc">Description</label>
+                    <input type="text" class="form-control form-control-sm"
+                           id="ce-desc" name="description"
+                           placeholder="Optional operator prose (shown on bty's /ui/images)">
+                </div>
+            </div>
+            <button type="submit" class="btn btn-sm btn-primary">
+                <i class="bi bi-plus-circle me-1"></i>Add entry
+            </button>
         </form>
     </div>
 </div>

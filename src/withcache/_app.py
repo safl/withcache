@@ -491,6 +491,56 @@ def create_app(
         app.state.catalog.add_oras_entry(url or "")
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
+    @app.post("/admin/catalog_add_entry")
+    def ui_admin_catalog_add_entry(
+        name: str = Form(""),
+        src: str = Form(""),
+        sha256: str = Form(""),
+        format: str = Form(""),
+        arch: str = Form(""),
+        size_bytes: str = Form(""),
+        description: str = Form(""),
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        """Full-shape add-entry form for the browser. Reuses the same
+        allowlist as the JSON ``POST /catalog/entries`` endpoint;
+        empty fields are dropped so the emitter doesn't persist them.
+        Validation errors surface as ``catalog.last_error`` and the
+        Catalog page renders them; happy path 303s back to
+        /ui/catalog with the entry visible in the table."""
+        cs: CatalogState = app.state.catalog
+        _name = name.strip()
+        _src = src.strip()
+        if not _name or not _src:
+            cs.last_error = "name and src are required"
+            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        if any(e.get("name") == _name for e in cs.entries):
+            cs.last_error = f"catalog entry with name={_name!r} already exists"
+            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        entry: dict[str, Any] = {"name": _name, "src": _src}
+        for key, val in (
+            ("sha256", sha256.strip()),
+            ("format", format.strip()),
+            ("arch", arch.strip()),
+            ("description", description.strip()),
+        ):
+            if val:
+                entry[key] = val
+        sb = size_bytes.strip()
+        if sb:
+            try:
+                entry["size_bytes"] = int(sb)
+            except ValueError:
+                cs.last_error = f"size_bytes must be an integer, got {sb!r}"
+                return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        cs.entries.append(entry)
+        cs.last_error = None
+        # Persist to disk so the entry survives a restart.
+        from ._api import _persist_catalog
+
+        _persist_catalog(cs)
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+
     @app.post("/admin/catalog_delete_entry")
     def ui_admin_catalog_delete_entry(
         name: str = Form(""),
