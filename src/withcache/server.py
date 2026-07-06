@@ -145,11 +145,21 @@ def _serialise_catalog(entries: list[dict[str, Any]]) -> bytes:
     ``tomli_w`` dep: the schema is flat so a hand-rolled emitter is
     safer than pulling in a write library. Only known scalar keys are
     emitted; unknown keys are dropped (silently) so an operator-added
-    row can't smuggle arbitrary TOML through."""
+    row can't smuggle arbitrary TOML through.
+
+    Scalar keys emitted: ``name``, ``src``, ``resolved_src``,
+    ``format``, ``arch``, ``sha256``, ``description``. Integer:
+    ``size_bytes``. ``resolved_src`` is the canonical fetch URL
+    (for ``oras://`` refs; equal to ``src`` for plain HTTPS);
+    bty needs it to render iPXE flash chains against the byte
+    URL directly. ``description`` is operator-supplied prose so
+    the /ui/images page has something better than the URL to
+    display.
+    """
     out: list[str] = ["version = 1", ""]
     for e in entries:
         out.append("[[images]]")
-        for key in ("name", "src", "format", "arch", "sha256"):
+        for key in ("name", "src", "resolved_src", "format", "arch", "sha256", "description"):
             val = e.get(key)
             if val is None or val == "":
                 continue
@@ -419,6 +429,19 @@ class Auth:
         if not self.password:
             return False
         return hmac.compare_digest(pw.encode("utf-8"), self.password.encode("utf-8"))
+
+    def check_bearer(self, token: str) -> bool:
+        """Constant-time compare a raw Bearer token against the
+        configured admin password. Used by the JSON control-plane's
+        service-to-service path (bty reads
+        ``$WITHCACHE_ADMIN_PASSWORD`` and sends it as
+        ``Authorization: Bearer <pw>``). Equivalent trust surface
+        to ``check_password`` -- both are password comparisons --
+        so callers can pick whichever channel their transport
+        supports."""
+        if not self.password:
+            return False
+        return hmac.compare_digest(token.encode("utf-8"), self.password.encode("utf-8"))
 
 
 # --------------------------------------------------------------------------
