@@ -9,8 +9,10 @@ re-pull instead of the registry.
   blob URL plus a short-lived anonymous bearer.
 - ``withcache.client`` re-points the download at a cache-host when
   ``WITHCACHE_SERVER`` is set and the blob is cached. A cache hit is served
-  bearer-free; a miss, timeout, or unset server falls back to the registry with
-  the bearer (and warms an auto-fetch cache for next time).
+  bearer-free; a miss, timeout, or unset server falls back to the registry
+  with the bearer. Since v0.10.0 a miss is recorded on the cache-host's
+  ``/ui/misses`` page (no background fetch) so an operator can turn a
+  recurring miss into a first-class catalog entry with one Fetch click.
 
 Both modules are stdlib-only, so this example has no third-party dependencies.
 

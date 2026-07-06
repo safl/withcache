@@ -11,10 +11,9 @@ the parts of the daemon that stay stdlib:
   under a process-wide write lock.
 - ``Auth``: server-signed HMAC cookie, ``WITHCACHE_ADMIN_PASSWORD``
   env gate. Signing key resolution via :func:`resolve_secret`.
-- ``DownloadManager`` + ``Stream`` + ``StreamRegistry``: bounded
-  worker pool that pulls origin URLs into the cache, plus the
-  in-flight progress tracker byte-serving reads share with the
-  operator UI.
+- ``DownloadManager``: bounded worker pool that pulls origin URLs
+  into the cache when the operator hits Download on /ui/catalog
+  or Fetch on /ui/misses.
 - ``CatalogState``: the periodically-fetched image manifest that
   bty flashes against, persisted to
   ``<data-dir>/catalog.toml`` between restarts.
@@ -754,65 +753,6 @@ class TruncatedDownload(Exception):
     written, so the same URL re-enqueues cleanly on the next request
     instead of permanently serving a malformed file.
     """
-
-
-@dataclass
-class Stream:
-    """One in-flight blob serve. Lives in memory only for the duration of
-    the response: registered before the first byte goes out, deregistered
-    in a finally block. Operator visibility into "what is the cache
-    currently uploading, and to whom" without touching the kernel's
-    /proc/net/tcp or the access log.
-    """
-
-    id: int
-    url: str
-    client: str  # ``ip:port`` of the consumer
-    started_at: float
-    bytes_sent: int = 0
-    total: int | None = None  # known up front from the blob row
-
-
-class StreamRegistry:
-    """Thread-safe registry of in-flight blob serves. Reads (snapshot for
-    the operator dash) and writes (start / progress / finish from
-    request handler threads) all serialised on a single lock; the
-    contention window is the few microseconds of a dict mutation, and
-    progress updates are batched at one per chunk (see PROGRESS_STRIDE)
-    so a 4 GiB stream is ~64k updates, not millions.
-    """
-
-    PROGRESS_STRIDE = 16  # update bytes_sent every N chunks (~1 MiB at CHUNK=64K)
-
-    def __init__(self) -> None:
-        self._ids = itertools.count(1)
-        self._lock = threading.Lock()
-        self._active: dict[int, Stream] = {}
-
-    def start(self, url: str, client: str, total: int | None) -> Stream:
-        with self._lock:
-            s = Stream(
-                id=next(self._ids), url=url, client=client, started_at=time.time(), total=total
-            )
-            self._active[s.id] = s
-            return s
-
-    def bump(self, stream_id: int, bytes_sent: int) -> None:
-        # Caller already gates by PROGRESS_STRIDE so this is cheap; the
-        # write itself only takes the lock long enough to mutate the int.
-        with self._lock:
-            s = self._active.get(stream_id)
-            if s is not None:
-                s.bytes_sent = bytes_sent
-
-    def finish(self, stream_id: int) -> None:
-        with self._lock:
-            self._active.pop(stream_id, None)
-
-    def snapshot(self) -> list[Stream]:
-        with self._lock:
-            # Stable order: oldest first (matches the queue mental model).
-            return sorted(self._active.values(), key=lambda s: s.started_at)
 
 
 @dataclass

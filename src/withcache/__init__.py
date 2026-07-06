@@ -7,9 +7,10 @@
   a cache-host (build serve URLs, probe what's cached) without re-implementing
   the ``/b/`` URL scheme.
 - ``withcache.oras``: OCI registry adapter. Parses ``oras://...`` references
-  and resolves them to a plain HTTPS blob URL + bearer headers. The cache-host
-  uses it on a cold miss; library consumers (e.g. ``bty``) import it to
-  validate catalog entries and pre-resolve content digests.
+  and resolves them to a plain HTTPS blob URL + bearer headers. The
+  cache-host's DownloadManager invokes it when an operator hits Download
+  on an ``oras://`` catalog entry; library consumers (e.g. ``bty``) import
+  it to validate catalog entries and pre-resolve content digests.
 
 Since v0.9.0 the daemon runs on FastAPI + Jinja + Bootstrap 5 + htmx
 (matching bty-web + nbdmux, the eventual ``trio-common`` extraction
@@ -21,6 +22,6 @@ inherit the framework floor.
 from . import oras
 from .client import blob_url, cache_base, is_cached, serve_url
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 __all__ = ["__version__", "blob_url", "cache_base", "is_cached", "oras", "serve_url"]

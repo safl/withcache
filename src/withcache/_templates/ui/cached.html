@@ -4,14 +4,8 @@
 {% block subnav %}
 <nav class="navbar subnav-strip" aria-label="Section sub-navigation">
     <div class="container">
-        <span class="text-muted">
-            {{ row_count }} cached blob{{ '' if row_count == 1 else 's' }},
-            {{ '%.1f' | format(total_bytes / (1024*1024*1024)) if total_bytes > 1024*1024*1024
-               else '%.1f' | format(total_bytes / (1024*1024)) if total_bytes > 1024*1024
-               else '%.1f' | format(total_bytes / 1024) }}
-            {{ 'GiB' if total_bytes > 1024*1024*1024
-               else 'MiB' if total_bytes > 1024*1024
-               else 'KiB' }} total
+        <span class="subnav-jumps d-flex align-items-center flex-wrap">
+            <a href="#cached-list">Blobs</a>
         </span>
     </div>
 </nav>
@@ -19,15 +13,16 @@
 
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
-    Blobs bty flashes through withcache land here. Each row is a
-    cached artifact keyed by the sha256 of its canonical source URL.
-    Use the trash button to drop a blob; the next request for that
-    URL will refetch from origin.
+    Blobs the operator downloaded via /ui/catalog or /ui/misses land
+    here. Each row is a cached artifact keyed by the sha256 of its
+    canonical source URL. Use the trash button to drop a blob; the
+    next request for that URL returns 404 until the operator
+    Downloads it again.
 </div>
 {% endblock %}
 
 {% block content %}
-<div class="card mb-3">
+<div class="card mb-3" id="cached-list">
     <div class="card-header bg-light fw-semibold py-2">
         <i class="bi bi-list-ul me-1"></i>Cached blobs
     </div>

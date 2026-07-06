@@ -38,7 +38,6 @@ from .server import (
     CatalogState,
     DownloadManager,
     Store,
-    StreamRegistry,
     resolve_secret,
 )
 
@@ -73,7 +72,6 @@ def create_app(
     secret_key: bytes | None = None,
     store: Store | None = None,
     mgr: DownloadManager | None = None,
-    streams: StreamRegistry | None = None,
     catalog: CatalogState | None = None,
     keep_query: bool = False,
     max_bytes: int = 0,
@@ -90,10 +88,10 @@ def create_app(
     stable bytes value so cookies stay valid across the fixture's
     lifetime without touching the disk.
 
-    ``store`` / ``mgr`` / ``streams`` let tests inject stubs /
-    capture doubles without spawning the real
-    :class:`DownloadManager` worker thread. :func:`server.main`
-    passes real instances at daemon start.
+    ``store`` / ``mgr`` let tests inject stubs / capture doubles
+    without spawning the real :class:`DownloadManager` worker
+    thread. :func:`server.main` passes real instances at daemon
+    start.
     """
     data_dir_str = str(data_dir)
     Path(data_dir_str).mkdir(parents=True, exist_ok=True)
@@ -159,16 +157,15 @@ def create_app(
 
     # Runtime objects the byte-serving handlers reach via
     # ``request.app.state``. Store writes a real cache.db under
-    # data_dir so tests exercise the SQLite path unchanged. mgr +
-    # streams default to real instances (they don't spawn threads
-    # at construction time; the mgr thread only starts on demand).
+    # data_dir so tests exercise the SQLite path unchanged. The mgr
+    # default is a real DownloadManager; its worker thread starts on
+    # demand (first enqueue).
     app.state.store = (
         store
         if store is not None
         else Store(data_dir_str, keep_query=keep_query, max_bytes=max_bytes)
     )
     app.state.mgr = mgr if mgr is not None else DownloadManager(app.state.store)
-    app.state.streams = streams if streams is not None else StreamRegistry()
     # Auth object exposed on app.state so :func:`register_api_routes`
     # (which owns the JSON catalog write endpoints) can gate them on
     # ``Authorization: Bearer <pw>``. The UI form + login flow read
@@ -366,7 +363,7 @@ def create_app(
                 log_level_effective = log_level_override or ""
                 log_level_error = str(exc)
         log_level_env = (os.environ.get(_settings_store.ENV_LOG_LEVEL) or "").strip()
-        flash_map = {"warming": "Warming settings saved."}
+        flash_map = {"logging": "Logging settings saved."}
         flash = error if error else flash_map.get(saved or "")
         flash_kind = "danger" if error else ("success" if flash else None)
         return render(
@@ -389,12 +386,12 @@ def create_app(
             flash_kind=flash_kind,
         )
 
-    @app.post("/admin/settings/warming")
-    def ui_admin_settings_warming(
+    @app.post("/admin/settings/logging")
+    def ui_admin_settings_logging(
         log_level: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        """Persist the Warming card's log-level override. Empty
+        """Persist the Logging card's log-level override. Empty
         submits clear the row so the resolver falls through to env /
         default. Invalid values 303 back with ``?error=<msg>`` and
         DO NOT persist -- rejecting at write time keeps the failure
@@ -420,7 +417,7 @@ def create_app(
             else:
                 _settings_store.clear(conn, _settings_store.KEY_LOG_LEVEL)
         return RedirectResponse(
-            url="/ui/settings?saved=warming#warming",
+            url="/ui/settings?saved=logging#logging",
             status_code=status.HTTP_303_SEE_OTHER,
         )
 

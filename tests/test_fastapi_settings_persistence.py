@@ -154,7 +154,7 @@ class SettingsFormRenderTests(_SettingsFormBase):
 
     def test_renders_form_with_action_target(self) -> None:
         body = self.client.get("/ui/settings").text
-        self.assertIn('action="/admin/settings/warming"', body)
+        self.assertIn('action="/admin/settings/logging"', body)
         self.assertIn('name="log_level"', body)
 
     def test_renders_all_log_level_options(self) -> None:
@@ -168,45 +168,45 @@ class SettingsFormRenderTests(_SettingsFormBase):
         self.assertIn("debug", body)
 
     def test_effective_shows_override_when_persisted(self) -> None:
-        self.client.post("/admin/settings/warming", data={"log_level": "trace"})
+        self.client.post("/admin/settings/logging", data={"log_level": "trace"})
         body = self.client.get("/ui/settings").text
         # The trace option is preselected + Effective column shows it.
         self.assertRegex(body, r'value="trace"\s+selected')
         self.assertIn("<code>trace</code>", body)
 
-    def test_warming_anchor_present(self) -> None:
+    def test_logging_anchor_present(self) -> None:
         body = self.client.get("/ui/settings").text
-        self.assertIn('id="warming"', body)
+        self.assertIn('id="logging"', body)
 
 
 class SettingsFormPersistTests(_SettingsFormBase):
     def test_valid_form_saves_and_redirects_with_flash(self) -> None:
         r = self.client.post(
-            "/admin/settings/warming",
+            "/admin/settings/logging",
             data={"log_level": "debug"},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/settings?saved=warming#warming")
-        body = self.client.get("/ui/settings?saved=warming").text
-        self.assertIn("Warming settings saved", body)
+        self.assertEqual(r.headers["location"], "/ui/settings?saved=logging#logging")
+        body = self.client.get("/ui/settings?saved=logging").text
+        self.assertIn("Logging settings saved", body)
 
     def test_saving_syncs_env_immediately(self) -> None:
         """The uvicorn boot path reads ``WITHCACHE_LOG_LEVEL`` from
         env; a form save syncs the env at write time so the change
         takes effect without a restart."""
         self.assertNotIn(_settings_store.ENV_LOG_LEVEL, os.environ)
-        self.client.post("/admin/settings/warming", data={"log_level": "debug"})
+        self.client.post("/admin/settings/logging", data={"log_level": "debug"})
         self.assertEqual(os.environ.get(_settings_store.ENV_LOG_LEVEL), "debug")
 
     def test_empty_override_clears_row(self) -> None:
-        self.client.post("/admin/settings/warming", data={"log_level": "debug"})
-        self.client.post("/admin/settings/warming", data={"log_level": ""})
+        self.client.post("/admin/settings/logging", data={"log_level": "debug"})
+        self.client.post("/admin/settings/logging", data={"log_level": ""})
         r = self.client.get("/ui/settings")
         self.assertEqual(r.status_code, 200)
 
     def test_case_insensitive_form_input(self) -> None:
-        self.client.post("/admin/settings/warming", data={"log_level": "DEBUG"})
+        self.client.post("/admin/settings/logging", data={"log_level": "DEBUG"})
         self.assertEqual(os.environ.get(_settings_store.ENV_LOG_LEVEL), "debug")
 
     def test_invalid_log_level_303s_with_error_and_no_persist(self) -> None:
@@ -214,7 +214,7 @@ class SettingsFormPersistTests(_SettingsFormBase):
         ``?error=<msg>`` and does NOT persist. Guards the resolver
         from having to raise on the next render."""
         r = self.client.post(
-            "/admin/settings/warming",
+            "/admin/settings/logging",
             data={"log_level": "chatty"},
             follow_redirects=False,
         )
@@ -228,7 +228,7 @@ class SettingsFormAuthTests(_SettingsFormBase):
 
     def test_save_requires_session(self) -> None:
         r = self.client.post(
-            "/admin/settings/warming",
+            "/admin/settings/logging",
             data={"log_level": ""},
             follow_redirects=False,
         )
@@ -238,12 +238,12 @@ class SettingsFormAuthTests(_SettingsFormBase):
     def test_save_works_after_login(self) -> None:
         self._login()
         r = self.client.post(
-            "/admin/settings/warming",
+            "/admin/settings/logging",
             data={"log_level": "debug"},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/settings?saved=warming#warming")
+        self.assertEqual(r.headers["location"], "/ui/settings?saved=logging#logging")
 
 
 if __name__ == "__main__":  # pragma: no cover
