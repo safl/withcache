@@ -21,6 +21,6 @@ inherit the framework floor.
 from . import oras
 from .client import blob_url, cache_base, is_cached, serve_url
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"
 
 __all__ = ["__version__", "blob_url", "cache_base", "is_cached", "oras", "serve_url"]
