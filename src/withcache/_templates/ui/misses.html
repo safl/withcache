@@ -3,10 +3,12 @@
 
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
-    Cache misses recorded on ``/blob`` / ``/b/<b64>/<name>`` requests.
-    In auto-fetch mode withcache enqueues a fetch in the background;
-    in curate mode an operator triggers the pull manually. Per-row
-    Fetch enqueues the pull; Dismiss removes the recorded miss.
+    URLs that clients requested but withcache doesn't have downloaded.
+    Useful for the "what's suddenly popular?" question: if a URL keeps
+    showing up here, it's probably worth adding to the catalog. Per-row
+    <strong>Fetch</strong> promotes the URL to a first-class catalog
+    entry AND enqueues its download; <strong>Dismiss</strong> removes
+    the recorded miss when the operator doesn't want it in the catalog.
 </div>
 {% endblock %}
 
@@ -35,13 +37,15 @@
                     <td class="small text-muted">{{ r['first_seen'] }}</td>
                     <td class="small text-muted">{{ r['last_seen'] }}</td>
                     <td class="text-end text-nowrap">
-                        {# Fetch: enqueue a background pull of this URL.
-                           Dismiss: remove the row (op curator ack'd
-                           they don't want it). #}
+                        {# Fetch: add the URL as a catalog entry AND
+                           enqueue the download so trio callers can
+                           see it once the bytes land.
+                           Dismiss: forget the row (op ack'd they
+                           don't want this URL in the catalog). #}
                         <form method="post" action="/admin/fetch" class="d-inline m-0">
                             <input type="hidden" name="url" value="{{ r['url'] }}">
                             <button type="submit" class="btn btn-sm btn-outline-primary me-1"
-                                    title="Enqueue a background fetch of this URL">
+                                    title="Add this URL as a catalog entry and download it">
                                 <i class="bi bi-cloud-download"></i>
                             </button>
                         </form>

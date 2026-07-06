@@ -88,25 +88,57 @@ class ListCatalogTests(_CatalogApiBase):
         self.assertIn("fetched_at", body)
         self.assertIn("last_error", body)
 
-    def test_list_returns_seeded_entries(self) -> None:
+    def test_list_returns_only_downloaded_entries(self) -> None:
+        """Since v0.11.0 ``GET /catalog`` returns ONLY entries whose
+        bytes are on disk. Trio consumers (bty, nbdmux) can trust
+        every entry they see is flashable / exportable; staged
+        entries stay invisible until their Download completes."""
         self.catalog.entries = [
             {
-                "name": "demo",
-                "src": "https://example/demo.img.gz",
+                "name": "ready",
+                "src": "https://example/ready.img.gz",
                 "format": "img.gz",
                 "sha256": "a" * 64,
                 "size_bytes": 1024,
-                "description": "demo image",
-                "resolved_src": "https://example/demo.img.gz",
-            }
+                "description": "downloaded",
+                "resolved_src": "https://example/ready.img.gz",
+            },
+            {
+                "name": "staged",
+                "src": "https://example/staged.img.gz",
+                "format": "img.gz",
+                "resolved_src": "https://example/staged.img.gz",
+            },
         ]
+        # Seed only the ``ready`` entry into the store; ``staged``
+        # remains added-but-not-downloaded.
+        self._seed_store_row("https://example/ready.img.gz", "a" * 64)
+
         r = self.client.get("/catalog")
         self.assertEqual(r.status_code, 200)
         entries = r.json()["entries"]
         self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["name"], "demo")
+        self.assertEqual(entries[0]["name"], "ready")
         self.assertEqual(entries[0]["sha256"], "a" * 64)
-        self.assertEqual(entries[0]["description"], "demo image")
+        self.assertEqual(entries[0]["description"], "downloaded")
+
+    def _seed_store_row(self, url: str, sha256: str) -> None:
+        """Insert a blobs row for ``url`` so ``store.get_blob`` returns
+        it; skips the actual file write because ``list_catalog`` only
+        checks the DB row."""
+        store = self.app.state.store
+        key = store.key_of(store.normalize(url))
+        with store.conn() as conn:
+            conn.execute(
+                "INSERT INTO blobs "
+                "(key, url, size, sha256, content_type, fetched_at, hits, misses) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, 0)",
+                (key, url, 1024, sha256, "application/octet-stream", "2026-07-06T00:00:00Z"),
+            )
+        # ``get_blob`` also checks the file exists on disk; create it.
+        import pathlib
+
+        pathlib.Path(store.blob_path(key)).write_bytes(b"x" * 1024)
 
 
 class AddCatalogEntryTests(_CatalogApiBase):

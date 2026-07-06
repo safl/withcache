@@ -16,6 +16,7 @@ factory.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import sys
 import threading
@@ -30,7 +31,7 @@ from jinja2 import Environment, FileSystemLoader
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__, _settings_store
-from ._api import register_api_routes
+from ._api import _persist_catalog, register_api_routes
 from .server import (
     DEFAULT_CATALOG_URL,
     Auth,
@@ -437,14 +438,52 @@ def create_app(
         header: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        """Enqueue a background fetch. Optional ``header`` field
-        carries a curated authorization payload, parsed by
-        :func:`withcache.server.parse_headers`."""
+        """Promote a URL to a first-class catalog entry AND enqueue
+        its download in one click. Bound to the ``Fetch`` button on
+        the ``/ui/misses`` page: the operator sees a URL clients
+        keep asking for, hits Fetch, and the URL becomes a normal
+        catalog entry that trio consumers (bty, nbdmux) can see as
+        soon as its bytes land.
+
+        The catalog name is auto-generated from the URL basename
+        (sanitised); when a collision would occur, a short suffix
+        derived from the URL keeps the name unique. Optional
+        ``header`` carries a curated authorization payload parsed
+        by :func:`withcache.server.parse_headers` so a token-gated
+        origin can be fetched.
+
+        No-op with a redirect when the URL is blank."""
+        import urllib.parse as _urlparse
+
         from .server import parse_headers
 
         u = (url or "").strip()
-        if u:
-            app.state.mgr.enqueue(u, headers=parse_headers(header or ""))
+        if not u:
+            return RedirectResponse(url="/ui/misses", status_code=status.HTTP_303_SEE_OTHER)
+
+        cs: CatalogState = app.state.catalog
+        already = next(
+            (e for e in cs.entries if (e.get("resolved_src") or e.get("src")) == u),
+            None,
+        )
+        if already is None:
+            # Derive a catalog name from the URL basename; fall back
+            # to the sha of the URL when the basename is empty
+            # (bare host + trailing slash).
+            parsed = _urlparse.urlsplit(u)
+            basename = _urlparse.unquote(parsed.path.rsplit("/", 1)[-1] or "")
+            if not basename:
+                basename = f"misses-{hashlib.sha256(u.encode('utf-8')).hexdigest()[:12]}"
+            candidate = basename
+            existing_names = {e.get("name") for e in cs.entries}
+            suffix = 2
+            while candidate in existing_names:
+                candidate = f"{basename}-{suffix}"
+                suffix += 1
+            entry: dict[str, Any] = {"name": candidate, "src": u, "resolved_src": u}
+            cs.entries.append(entry)
+            _persist_catalog(cs)
+        app.state.mgr.enqueue(u, headers=parse_headers(header or ""))
         return RedirectResponse(url="/ui/downloads", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/dismiss")

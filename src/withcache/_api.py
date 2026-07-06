@@ -11,15 +11,15 @@ stay byte-identical:
   decorative; the b64 token is the source of truth.
 - Cache hit -> 200 + ``Content-Type`` + ``Content-Length`` +
   ``X-Withcache-Sha256`` + streamed body (64 KiB chunks).
-- Cache miss -> 404 with ``cache miss (recorded)`` body,
-  side-effect of enqueueing a background fetch when
-  ``auto_fetch`` is on and the store has capacity.
-- HEAD support: same headers, no body (probes from
-  bty.web._withcache.is_cached use HEAD).
-- ``Authorization`` request header forwarded onto the background
-  fetch worker so a token-gated origin (typical use case: an OCI
-  bearer minted by bty at catalog import time) can be pulled by
-  the worker with the same credential.
+- Cache miss -> 404 with a message pointing at ``/ui/catalog``'s
+  Download button, plus a side-effect ``record_miss`` write so the
+  ``/ui/misses`` page shows the operator what clients tried to
+  fetch that isn't in the catalog yet.
+
+Since v0.10.0 there is no auto-fetch on miss: the operator
+explicitly Downloads. The Miss page's Fetch button (retargeted in
+v0.11.0) promotes a missed URL to a catalog entry + enqueues the
+Download in one click.
 
 Streaming shape: FastAPI ``StreamingResponse`` with a generator
 that reads chunks from the on-disk blob at 64 KiB reads;
@@ -141,10 +141,9 @@ def _serve_blob(
 def register_api_routes(app: FastAPI) -> None:
     """Attach the byte-serving routes to ``app``.
 
-    Runtime objects (``store``, ``mgr``, ``streams``, ``auto_fetch``)
-    are read from ``app.state`` at request time so tests + the
-    lifespan hook can inject fresh instances without rebuilding
-    the app.
+    Runtime objects (``store``, ``mgr``, ``streams``) are read from
+    ``app.state`` at request time so tests + the lifespan hook can
+    inject fresh instances without rebuilding the app.
     """
 
     @app.get("/blob", response_class=Response)
@@ -212,25 +211,25 @@ def register_api_routes(app: FastAPI) -> None:
 
         Open route: bty polls this from a sibling container without a
         session (mirrors the ``/blob`` byte-serving surface's trust
-        model -- LAN-only, no auth on reads). Returns a snapshot of
-        the in-process ``CatalogState.entries`` plus provenance
-        metadata (URL, env pin, fetch timestamps) so clients can
-        detect staleness. Every entry is enriched with a
-        ``downloaded_at`` field (or ``None``) so nbdmux + bty can
-        filter to only-downloaded entries without a second call. No
-        pagination -- the catalog is small (dozens of entries at
+        model -- LAN-only, no auth on reads). Returns only entries
+        whose bytes are on disk in withcache's cache. Since v0.11.0
+        "presence in this list" IS the readiness signal: staged
+        entries (added but not yet Downloaded) are invisible to trio
+        consumers so bty + nbdmux can trust every entry they see is
+        flashable / exportable. Operators see the staged view on
+        withcache's own ``/ui/catalog``.
+
+        No pagination -- the catalog is small (dozens of entries at
         most).
         """
         cs: CatalogState = request.app.state.catalog
         store = request.app.state.store
         entries_out: list[dict[str, Any]] = []
         for e in cs.entries:
-            enriched = dict(e)
             fetch_url = e.get("resolved_src") or e.get("src") or ""
-            row = store.get_blob(fetch_url) if fetch_url else None
-            enriched["downloaded_at"] = row["fetched_at"] if row else None
-            enriched["downloaded_size"] = int(row["size"]) if row else None
-            entries_out.append(enriched)
+            if not fetch_url or store.get_blob(fetch_url) is None:
+                continue
+            entries_out.append(dict(e))
         return JSONResponse(
             {
                 "url": cs.url,

@@ -120,22 +120,71 @@ class _AdminBase(unittest.TestCase):
 
 
 class DownloadActionTests(_AdminBase):
-    def test_fetch_enqueues_url(self) -> None:
+    def test_fetch_promotes_url_to_catalog_entry_and_enqueues(self) -> None:
+        """Since v0.11.0 the Fetch button on /ui/misses promotes the
+        URL to a first-class catalog entry (auto-generated name from
+        the basename) AND enqueues the download. This lets an
+        operator turn a recurring miss into a permanent, trio-visible
+        catalog entry with one click."""
         r = self.client.post(
             "/admin/fetch",
-            data={"url": "https://example.invalid/x.bin"},
+            data={"url": "https://example.invalid/rocm-6.tar.gz"},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/ui/downloads")
+
+        # Fetch was enqueued.
         self.assertEqual(len(self.mgr_calls), 1)
         self.assertEqual(self.mgr_calls[0][0], "enqueue")
-        self.assertEqual(self.mgr_calls[0][1]["url"], "https://example.invalid/x.bin")
+        self.assertEqual(self.mgr_calls[0][1]["url"], "https://example.invalid/rocm-6.tar.gz")
+
+        # AND the URL landed as a catalog entry.
+        names = [e.get("name") for e in self.app.state.catalog.entries]
+        self.assertIn("rocm-6.tar.gz", names)
+
+    def test_fetch_bare_host_falls_back_to_derived_name(self) -> None:
+        """A URL with no basename (bare host + trailing slash) still
+        yields a stable catalog name derived from a short hash of
+        the URL, so the promote-and-download step never fails on
+        odd inputs."""
+        self.client.post(
+            "/admin/fetch",
+            data={"url": "https://example.invalid/"},
+            follow_redirects=False,
+        )
+        names = [e.get("name") for e in self.app.state.catalog.entries]
+        self.assertTrue(any(n and n.startswith("misses-") for n in names))
+
+    def test_fetch_existing_entry_only_enqueues(self) -> None:
+        """When the URL matches an existing catalog entry's src, we
+        skip the duplicate-add step and just enqueue the download.
+        Idempotent from the operator's perspective."""
+        self.app.state.catalog.entries.append(
+            {
+                "name": "already-there",
+                "src": "https://example.invalid/existing.bin",
+                "resolved_src": "https://example.invalid/existing.bin",
+            }
+        )
+        self.client.post(
+            "/admin/fetch",
+            data={"url": "https://example.invalid/existing.bin"},
+            follow_redirects=False,
+        )
+        # Still only one entry with that name; no duplicate.
+        matching = [
+            e for e in self.app.state.catalog.entries if e.get("name") == "already-there"
+        ]
+        self.assertEqual(len(matching), 1)
+        # Download WAS enqueued.
+        self.assertEqual(len(self.mgr_calls), 1)
 
     def test_fetch_empty_url_no_op(self) -> None:
         r = self.client.post("/admin/fetch", data={"url": ""}, follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(self.mgr_calls, [])
+        self.assertEqual(self.app.state.catalog.entries, [])
 
     def test_cancel_dispatches_int_id(self) -> None:
         r = self.client.post("/admin/cancel", data={"id": "42"}, follow_redirects=False)
