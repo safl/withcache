@@ -30,6 +30,7 @@ Downloads page shows in-flight transfers as they run.
 from __future__ import annotations
 
 import base64
+import contextlib
 import urllib.parse
 from collections.abc import Iterator
 from typing import Any
@@ -88,7 +89,27 @@ def _serve_blob(
         row = None
 
     if row is None:
-        store.record_miss(url)
+        fresh = store.record_miss(url)
+        if fresh:
+            # First miss for this URL: emit an audit event so the
+            # operator sees it on /ui/events. Subsequent misses for
+            # the same URL bump the counter without re-emitting.
+            from . import _events_log
+
+            with contextlib.suppress(Exception):
+                with store.conn() as ev_conn:
+                    _events_log.record(
+                        ev_conn,
+                        kind="blob.miss.recorded",
+                        summary=f"First cache miss for {url}",
+                        subject_kind="blob",
+                        subject_id=url,
+                        actor="client",
+                        source_ip=_events_log.normalize_ip(
+                            request.client.host if request.client else None
+                        ),
+                    )
+                    ev_conn.commit()
         return PlainTextResponse(
             "cache miss: this URL hasn't been downloaded yet. "
             "Pick the matching catalog entry on /ui/catalog and hit Download.\n",

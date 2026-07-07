@@ -466,6 +466,8 @@ class Store:
         return c
 
     def _init_db(self):
+        from . import _events_log
+
         with self.conn() as c:
             c.executescript(
                 """
@@ -488,6 +490,7 @@ class Store:
                 );
                 """
             )
+            _events_log.init(c)
             # Migrate DBs created before the per-blob request counters existed.
             cols = {r["name"] for r in c.execute("PRAGMA table_info(blobs)")}
             for col in ("hits", "misses"):
@@ -542,10 +545,16 @@ class Store:
         return self.max_bytes <= 0 or self.total_size() < self.max_bytes
 
     # -- writes ------------------------------------------------------------
-    def record_miss(self, url: str):
+    def record_miss(self, url: str) -> bool:
+        """Record one cache miss for ``url``. Returns ``True`` iff
+        this is the first miss for the URL (fresh row inserted);
+        callers that want to fire a one-shot event (audit log,
+        alerts) use the return value to gate the emit so a URL
+        clients keep hammering only produces one entry."""
         key = self.key_of(self.normalize(url))
         ts = now_iso()
         with _DB_WRITE_LOCK, self.conn() as c:
+            existed = c.execute("SELECT 1 FROM misses WHERE key=?", (key,)).fetchone()
             c.execute(
                 """
                 INSERT INTO misses (key, url, count, first_seen, last_seen)
@@ -557,6 +566,7 @@ class Store:
                 """,
                 (key, url, ts, ts),
             )
+        return existed is None
 
     def record_hit(self, key: str):
         """Count one cache-served download (the GET, not the shim's HEAD probe)."""
@@ -838,6 +848,8 @@ class DownloadManager:
                 self._jobs.pop(jid, None)
 
     def _worker(self):
+        from . import _events_log
+
         while True:
             jid = self._q.get()
             if jid == self._STOP:
@@ -848,13 +860,15 @@ class DownloadManager:
                     continue  # cancelled while queued, or gone
                 job.status = "running"
                 job.started_at = time.time()
+            _worker_emit(
+                _events_log,
+                self.store,
+                kind="catalog.entry.download.started",
+                summary=f"Download started for {job.url}",
+                subject_id=job.url,
+                details={"job_id": job.id, "url": job.url},
+            )
             try:
-                # For oras://, the cache key stays the original ref but
-                # the actual request goes through a freshly-minted
-                # bearer + resolved blob URL. The resolver runs per
-                # resume attempt so a long fetch survives bearer /
-                # signed-URL TTL expiry mid-stream (the same kind of
-                # cut the surrounding Range-resume loop was built for).
                 fetch_resolver: object = None
                 if oras.is_oras_url(job.url):
 
@@ -874,13 +888,49 @@ class DownloadManager:
                     job.status = "completed"
                     job.sha256 = row["sha256"]
                     job.bytes_done = job.bytes_total = row["size"]
+                _worker_emit(
+                    _events_log,
+                    self.store,
+                    kind="catalog.entry.download.completed",
+                    summary=f"Download completed for {job.url}",
+                    subject_id=job.url,
+                    details={
+                        "job_id": job.id,
+                        "url": job.url,
+                        "size": row["size"],
+                        "sha256": row["sha256"],
+                    },
+                )
             except DownloadCancelled:
                 with self._lock:
                     job.status = "cancelled"
+                _worker_emit(
+                    _events_log,
+                    self.store,
+                    kind="catalog.entry.download.cancelled",
+                    summary=f"Download cancelled for {job.url}",
+                    subject_id=job.url,
+                    details={"job_id": job.id, "url": job.url},
+                )
             except Exception as e:
                 with self._lock:
                     job.status = "cancelled" if job._cancel.is_set() else "failed"
                     job.error = str(e)
+                cancelled = job.status == "cancelled"
+                _worker_emit(
+                    _events_log,
+                    self.store,
+                    kind=(
+                        "catalog.entry.download.cancelled"
+                        if cancelled
+                        else "catalog.entry.download.failed"
+                    ),
+                    summary=(
+                        f"Download {'cancelled' if cancelled else 'failed'} for {job.url}: {e}"
+                    ),
+                    subject_id=job.url,
+                    details={"job_id": job.id, "url": job.url, "error": str(e)},
+                )
             finally:
                 with self._lock:
                     job.finished_at = time.time()
@@ -892,6 +942,35 @@ def _set_progress(job: Job, done: int, total: int | None):
     job.bytes_done = done
     if total is not None:
         job.bytes_total = total
+
+
+def _worker_emit(
+    events_log_mod,
+    store: Store,
+    *,
+    kind: str,
+    summary: str,
+    subject_id: str,
+    details: dict | None = None,
+) -> None:
+    """Best-effort emit of a system-actor event from the download
+    worker. Opens its own short-lived connection so the store lock
+    doesn't stay held across the event write. Any failure (schema
+    drift, sqlite busy) is swallowed."""
+    try:
+        with store.conn() as conn:
+            events_log_mod.record(
+                conn,
+                kind=kind,
+                summary=summary,
+                subject_kind="catalog",
+                subject_id=subject_id,
+                actor="system",
+                details=details,
+            )
+            conn.commit()
+    except Exception:  # noqa: BLE001 -- worker emit is best-effort
+        pass
 
 
 def _oras_tag_moved(url: str, cached_sha: str | None, *, resolve=oras.resolve_ref) -> bool:
