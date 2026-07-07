@@ -1053,9 +1053,10 @@ def main():
     mgr = DownloadManager(store, workers=args.workers)
     auth_password = os.environ.get("WITHCACHE_ADMIN_PASSWORD")
 
-    # Since v0.10.0 there is no auto-fetch on miss: the operator
-    # hits Download on /ui/catalog to enqueue a fetch. The daemon
-    # is always in "curate" mode; the --curate flag went with it.
+    # Withcache is operator-populated: cache misses return 404 (v0.10.0+)
+    # and the operator hits Download on /ui/catalog to enqueue a fetch.
+    # The v0.12.0 UI consolidation folded Cached + Downloads into the
+    # Catalog page's per-row status column and progress bar.
     print(
         f"withcache cache-host on http://{args.host}:{args.port}  "
         f"(data={store.data_dir}, keep_query={args.keep_query}, workers={args.workers}, "
