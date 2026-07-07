@@ -94,9 +94,7 @@ class EmitterTests(_EventsBase):
         self.assertIn("vm.img.zst", added.summary)
 
     def test_catalog_delete_entry_emits_event(self) -> None:
-        self.catalog.entries.append(
-            {"name": "vm", "src": "https://example.invalid/vm.img.zst"}
-        )
+        self.catalog.entries.append({"name": "vm", "src": "https://example.invalid/vm.img.zst"})
         self.client.post(
             "/admin/catalog_delete_entry",
             data={"name": "vm"},
