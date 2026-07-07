@@ -1,0 +1,142 @@
+{% extends "ui/_layout.html" %}
+{% block title %}Dashboard - withcache{% endblock %}
+
+{% block subnav %}
+<nav class="navbar subnav-strip" aria-label="Section sub-navigation">
+    <div class="container">
+        <span class="subnav-jumps d-flex align-items-center flex-wrap">
+            <a href="#dash-catalog">Catalog</a>
+            <span class="vr"></span>
+            <a href="#dash-health">Health</a>
+            <span class="vr"></span>
+            <a href="#dash-misses">Recent misses</a>
+        </span>
+    </div>
+</nav>
+{% endblock %}
+
+{% block intro %}
+<div class="alert alert-secondary small mb-3">
+    Withcache overview. Catalog entries staged by the operator, the
+    bytes cached on disk, download activity, and the last few URLs
+    clients asked for that are not in the catalog. Drill in via
+    Catalog / Misses.
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="row g-3 mb-4">
+    <div class="col-lg-6 col-md-6">
+        <div class="card h-100 shadow-sm" id="dash-catalog">
+            <div class="card-header bg-light fw-semibold d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-book me-1"></i>Catalog</span>
+                <a class="small text-decoration-none" href="/ui/catalog">Open catalog &rarr;</a>
+            </div>
+            <ul class="list-group list-group-flush">
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span>Entries staged</span>
+                    <span class="badge bg-primary rounded-pill">{{ entries_total }}</span>
+                </li>
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span>Entries cached</span>
+                    <span class="badge bg-success rounded-pill">{{ entries_cached }}</span>
+                </li>
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span>Cached blobs on disk</span>
+                    <span class="badge bg-light text-dark border rounded-pill">{{ blob_count }}</span>
+                </li>
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span>Cached bytes</span>
+                    <code class="small">{{ cached_bytes }}</code>
+                </li>
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span>Downloads in flight</span>
+                    {% if active_jobs %}
+                    <span class="badge bg-info text-dark rounded-pill">
+                        <i class="bi bi-arrow-down-circle me-1"></i>{{ active_jobs }}
+                    </span>
+                    {% else %}
+                    <span class="text-muted small">-</span>
+                    {% endif %}
+                </li>
+                {% if failed_jobs %}
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <span>Failed downloads</span>
+                    <span class="badge bg-danger rounded-pill">{{ failed_jobs }}</span>
+                </li>
+                {% endif %}
+            </ul>
+        </div>
+    </div>
+    <div class="col-lg-6 col-md-6">
+        <div class="card h-100 shadow-sm" id="dash-health">
+            <div class="card-header bg-light fw-semibold d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-heart-pulse me-1"></i>Health</span>
+                {% set _checks = sanity | rejectattr("info") | list %}
+                {% set _ok = _checks | selectattr("ok") | list | length %}
+                <span class="text-muted small">{{ _ok }} / {{ _checks | length }} OK</span>
+            </div>
+            <ul class="list-group list-group-flush">
+                {% for s in sanity %}
+                <li class="list-group-item d-flex align-items-center">
+                    {% if s.info %}
+                    <i class="bi bi-info-circle-fill text-info fs-5 me-2 flex-shrink-0" aria-label="info"></i>
+                    {% elif s.ok %}
+                    <i class="bi bi-check-circle-fill text-success fs-5 me-2 flex-shrink-0" aria-label="ok"></i>
+                    {% else %}
+                    <i class="bi bi-x-circle-fill text-danger fs-5 me-2 flex-shrink-0" aria-label="not ok"></i>
+                    {% endif %}
+                    {% if s.href or s.fix_href %}
+                    <a href="{{ s.fix_href if (not s.ok and not s.info) else s.href }}"
+                       class="text-decoration-none text-body flex-grow-1">
+                        <span class="fw-semibold small">{{ s.label }}</span>
+                        <div class="text-muted small">{{ s.detail }}</div>
+                    </a>
+                    {% else %}
+                    <div class="flex-grow-1">
+                        <span class="fw-semibold small">{{ s.label }}</span>
+                        <div class="text-muted small">{{ s.detail }}</div>
+                    </div>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-3" id="dash-misses">
+    <div class="card-header bg-light fw-semibold d-flex justify-content-between align-items-center py-2">
+        <span><i class="bi bi-exclamation-diamond me-1"></i>Recent misses</span>
+        <a class="small text-decoration-none" href="/ui/misses">Open misses &rarr;</a>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-striped table-hover mb-0 align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>URL</th>
+                    <th class="text-end" style="width: 1%; white-space: nowrap;">Count</th>
+                    <th style="width: 1%; white-space: nowrap;">Last seen</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in recent_misses %}
+                <tr>
+                    <td class="small font-monospace text-truncate" style="max-width: 32rem;"
+                        title="{{ r['url'] }}">{{ r['url'] }}</td>
+                    <td class="text-end">{{ r['count'] }}</td>
+                    <td class="small text-muted">{{ r['last_seen'] }}</td>
+                </tr>
+                {% endfor %}
+                {% if not recent_misses %}
+                <tr><td colspan="3" class="text-muted text-center py-3">
+                    No recorded misses yet. When clients ``curl`` withcache for
+                    a URL that isn't cached the request shows up here so the
+                    operator can decide whether to promote it to the catalog.
+                </td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

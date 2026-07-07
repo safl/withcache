@@ -189,26 +189,19 @@
     <div class="container">
         {# Brand pill doubles as the click-to-dashboard link (same
            convention as bty + nbdmux). The ``brand-active`` state
-           lights when the operator is on the root ``/ui/cached``
-           page so the brand pill signals "you are here." #}
-        <a class="navbar-brand fw-semibold {% if nav_active == 'cached' %}brand-active{% endif %}"
-           href="/ui/cached">
+           lights when the operator is on ``/ui/dashboard``. #}
+        <a class="navbar-brand fw-semibold {% if nav_active == 'dashboard' %}brand-active{% endif %}"
+           href="/ui/dashboard">
             <i class="bi bi-database me-1"></i>WITHCACHE
         </a>
         {% if logged_in %}
         <div class="d-flex flex-grow-1 align-items-center flex-wrap">
             <div class="me-auto d-flex flex-wrap">
-                <a class="nav-btn {% if nav_active == 'cached' %}active{% endif %}" href="/ui/cached">
-                    <i class="bi bi-hdd"></i>Cached
-                </a>
-                <a class="nav-btn {% if nav_active == 'downloads' %}active{% endif %}" href="/ui/downloads">
-                    <i class="bi bi-cloud-download"></i>Downloads
+                <a class="nav-btn {% if nav_active == 'catalog' %}active{% endif %}" href="/ui/catalog">
+                    <i class="bi bi-book"></i>Catalog
                 </a>
                 <a class="nav-btn {% if nav_active == 'misses' %}active{% endif %}" href="/ui/misses">
                     <i class="bi bi-exclamation-diamond"></i>Misses
-                </a>
-                <a class="nav-btn {% if nav_active == 'catalog' %}active{% endif %}" href="/ui/catalog">
-                    <i class="bi bi-book"></i>Catalog
                 </a>
                 <a class="nav-btn {% if nav_active == 'settings' %}active{% endif %}" href="/ui/settings">
                     <i class="bi bi-sliders"></i>Settings

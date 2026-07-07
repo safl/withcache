@@ -22,10 +22,9 @@
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
     Effective configuration for this withcache instance. The
-    Logging card below is form-editable; catalog URL persistence
-    goes through the Catalog page's Set-URL form so the on-disk
-    override file the daemon reads at boot stays the single source
-    of truth.
+    Catalog source + Logging cards below are form-editable; each
+    write goes through a persistent on-disk override so the daemon
+    reads the same value across restarts.
 </div>
 {% if flash %}
 <div class="alert alert-{{ flash_kind or 'secondary' }} small mb-3">
@@ -120,40 +119,78 @@
     <div class="card-header bg-light fw-semibold py-2">
         <i class="bi bi-book me-1"></i>Catalog source
     </div>
-    <div class="table-responsive">
-        <table class="table mb-0 align-middle">
-            <thead class="table-light">
-                <tr>
-                    <th>Setting</th>
-                    <th>Effective</th>
-                    <th>Source</th>
-                    <th>Notes</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td><i class="bi bi-globe me-1"></i>Catalog URL</td>
-                    <td class="font-monospace small">{{ catalog_url }}</td>
-                    <td><span class="badge bg-light text-dark border">env WITHCACHE_CATALOG_URL</span></td>
-                    <td class="text-muted small">
-                        The URL withcache fetches ``catalog.toml`` bytes
-                        from. Env pin wins over on-disk override;
-                        override wins over the shipping default.
-                    </td>
-                </tr>
+    <div class="card-body small">
+        <p class="text-muted mb-2">
+            URL withcache fetches <code>catalog.toml</code> bytes
+            from. Env pin (<code>WITHCACHE_CATALOG_URL</code>) wins
+            over on-disk override; override wins over the shipping
+            default. Empty submit clears the override and reverts to
+            the shipping default. The
+            <em>Fetch default catalog</em> button re-parses the
+            currently-effective source and merges its entries into
+            <code>catalog.toml</code>.
+        </p>
+        <div class="row g-2 mb-2">
+            <div class="col-md-3 text-muted">Effective URL</div>
+            <div class="col-md-9 font-monospace">{{ catalog_url }}</div>
+        </div>
+        <div class="row g-2 mb-2">
+            <div class="col-md-3 text-muted">Env pin</div>
+            <div class="col-md-9 font-monospace">
                 {% if catalog_env_url %}
-                <tr>
-                    <td class="text-muted"><i class="bi bi-pin me-1"></i>Env pin</td>
-                    <td class="font-monospace small">{{ catalog_env_url }}</td>
-                    <td><span class="badge bg-info text-dark">env-locked</span></td>
-                    <td class="text-muted small">
-                        Env var is set; operator ``/admin/catalog_set_url``
-                        overrides are refused while it is.
-                    </td>
-                </tr>
+                {{ catalog_env_url }}
+                {% else %}
+                <span class="text-muted">(unset)</span>
                 {% endif %}
-            </tbody>
-        </table>
+            </div>
+        </div>
+        {% if catalog_fetched_at %}
+        <div class="row g-2 mb-2">
+            <div class="col-md-3 text-muted">Last fetched</div>
+            <div class="col-md-9">{{ catalog_fetched_at }}</div>
+        </div>
+        {% endif %}
+        {% if catalog_last_error %}
+        <div class="alert alert-danger small mt-2 mb-0">
+            <i class="bi bi-exclamation-triangle me-1"></i>{{ catalog_last_error }}
+        </div>
+        {% endif %}
+        {% if catalog_last_info %}
+        <div class="alert alert-info small mt-2 mb-0">{{ catalog_last_info }}</div>
+        {% endif %}
+        <form method="post" action="/admin/catalog_set_url" class="mt-3 mb-2">
+            <label for="settings-catalog-url" class="form-label small mb-1">
+                Override catalog URL
+            </label>
+            <div class="d-flex gap-2">
+                <input type="url" class="form-control form-control-sm font-monospace"
+                       id="settings-catalog-url" name="url"
+                       placeholder="https://... or oras://owner/repo:tag"
+                       value="{% if not catalog_env_url %}{{ catalog_url }}{% endif %}"
+                       {% if catalog_env_url %}disabled{% endif %}>
+                <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap"
+                        {% if catalog_env_url %}disabled{% endif %}>
+                    <i class="bi bi-save me-1"></i>Set URL
+                </button>
+            </div>
+            <div class="form-text small">
+                {% if catalog_env_url %}
+                Env pin is set; override is refused while
+                <code>WITHCACHE_CATALOG_URL</code> is present in the
+                environment.
+                {% else %}
+                Empty submit clears the override and reverts to the
+                shipping default.
+                {% endif %}
+            </div>
+        </form>
+        <form method="post" action="/admin/catalog_refresh" class="mb-0">
+            <input type="hidden" name="next" value="settings">
+            <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap"
+                    title="GET the catalog URL and merge its entries into catalog.toml">
+                <i class="bi bi-arrow-clockwise me-1"></i>Fetch default catalog
+            </button>
+        </form>
     </div>
 </div>
 

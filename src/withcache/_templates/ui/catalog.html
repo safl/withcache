@@ -1,21 +1,43 @@
 {% extends "ui/_layout.html" %}
+{% from "ui/_table_macros.html" import sort_header, pagination_inline, filter_form with context %}
 {% block title %}Catalog - withcache{% endblock %}
 
 {% block subnav %}
+{# Left: jump link to the entries table.
+   Right: three inline actions -- Add ORAS URL, Add HTTPS URL,
+   Fetch default catalog. The catalog source URL itself is edited
+   on /ui/settings so the Catalog page stays focused on the
+   entries data. #}
 <nav class="navbar subnav-strip" aria-label="Section sub-navigation">
     <div class="container">
         <span class="subnav-jumps d-flex align-items-center flex-wrap">
-            <a href="#catalog-source">Source</a>
-            <span class="vr"></span>
-            <a href="#catalog-add">Add HTTPS</a>
-            <span class="vr"></span>
             <a href="#catalog-entries">Entries</a>
         </span>
-        <form method="post" action="/admin/catalog_refresh"
+        <form method="post" action="/admin/catalog_add_oras"
               class="subnav-actions d-flex align-items-center gap-1 m-0 ms-auto">
+            <input type="text" required class="form-control form-control-sm font-monospace"
+                   name="url" style="max-width: 18rem; min-width: 0;"
+                   placeholder="oras://ghcr.io/owner/repo:tag"
+                   title="Add an oras:// entry; the registry walk fills format + size from the manifest.">
+            <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">
+                <i class="bi bi-plus-circle me-1"></i>Add ORAS
+            </button>
+        </form>
+        <form method="post" action="/admin/catalog_add_entry"
+              class="subnav-actions d-flex align-items-center gap-1 m-0">
+            <input type="url" required class="form-control form-control-sm font-monospace"
+                   name="url" style="max-width: 18rem; min-width: 0;"
+                   placeholder="https://example.com/appliance.img.gz"
+                   title="Add an https:// entry; name comes from the URL basename, format from the file suffix. sha + size arrive at Download time.">
+            <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">
+                <i class="bi bi-plus-circle me-1"></i>Add HTTPS
+            </button>
+        </form>
+        <form method="post" action="/admin/catalog_refresh"
+              class="subnav-actions d-flex align-items-center gap-1 m-0">
             <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap"
-                    title="GET the catalog URL and re-parse entries">
-                <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                    title="Re-fetch the currently-configured catalog source (Settings > Catalog source) and merge its entries.">
+                <i class="bi bi-arrow-clockwise me-1"></i>Fetch default
             </button>
         </form>
     </div>
@@ -24,174 +46,41 @@
 
 {% block intro %}
 <div class="alert alert-secondary small mb-3">
-    The image catalog withcache fetched at process start (best-effort;
-    persisted to ``&lt;data-dir&gt;/catalog.toml`` and re-loaded on
-    restart). Refresh + Set URL + Add oras + Delete actions on the
-    subnav / row forms below.
+    Operator-staged catalog entries. Add + Download here; the
+    trio-facing <code>GET /catalog</code> API filters to entries whose
+    bytes are already downloaded so bty + nbdmux never see a
+    not-yet-ready entry. Configure the catalog source URL on
+    <a href="/ui/settings#catalog">Settings &rarr; Catalog source</a>.
 </div>
+{% if catalog_last_error %}
+<div class="alert alert-danger small mb-3">
+    <i class="bi bi-exclamation-triangle me-1"></i>{{ catalog_last_error }}
+</div>
+{% endif %}
+{% if catalog_last_info %}
+<div class="alert alert-info small mb-3">{{ catalog_last_info }}</div>
+{% endif %}
 {% endblock %}
 
 {% block content %}
-<div class="card mb-3" id="catalog-source">
-    <div class="card-header bg-light fw-semibold py-2">
-        <i class="bi bi-globe me-1"></i>Catalog source
-    </div>
-    <div class="card-body small">
-        <div class="row">
-            <div class="col-md-3 text-muted">Effective URL</div>
-            <div class="col-md-9 font-monospace">{{ catalog_url }}</div>
-        </div>
-        <div class="row mt-1">
-            <div class="col-md-3 text-muted">Env pin</div>
-            <div class="col-md-9 font-monospace">
-                {% if catalog_env_url %}
-                {{ catalog_env_url }}
-                {% else %}
-                <span class="text-muted">(unset)</span>
-                {% endif %}
-            </div>
-        </div>
-        {% if catalog_fetched_at %}
-        <div class="row mt-1">
-            <div class="col-md-3 text-muted">Last fetched</div>
-            <div class="col-md-9">{{ catalog_fetched_at }}</div>
-        </div>
-        {% endif %}
-        {% if catalog_last_error %}
-        <div class="alert alert-danger small mt-2 mb-0">
-            <i class="bi bi-exclamation-triangle me-1"></i>{{ catalog_last_error }}
-        </div>
-        {% endif %}
-        {% if catalog_last_info %}
-        <div class="alert alert-info small mt-2 mb-0">{{ catalog_last_info }}</div>
-        {% endif %}
-        {# Set URL: operator override. Empty submit clears the override
-           and falls back to the shipping default (env pin still wins). #}
-        <form method="post" action="/admin/catalog_set_url" class="mt-3 mb-0">
-            <label for="catalog-url-input" class="form-label small mb-1">
-                Override catalog URL
-            </label>
-            <div class="d-flex gap-2">
-                <input type="url" class="form-control form-control-sm font-monospace"
-                       id="catalog-url-input" name="url"
-                       placeholder="https://... or oras://owner/repo:tag"
-                       value="{% if not catalog_env_url %}{{ catalog_url }}{% endif %}">
-                <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">
-                    <i class="bi bi-save me-1"></i>Set URL
-                </button>
-            </div>
-            <div class="form-text small">
-                {% if catalog_env_url %}
-                Env pin is set; override is refused while the env var is
-                present. Unset <code>WITHCACHE_CATALOG_URL</code> to
-                allow overrides.
-                {% else %}
-                Empty submit clears the override and reverts to the
-                shipping default.
-                {% endif %}
-            </div>
-        </form>
-        {# Add oras: append a fresh oras:// entry. The manifest walk
-           populates sha256/format/size from the registry so the
-           operator doesn't have to type them. #}
-        <form method="post" action="/admin/catalog_add_oras" class="mt-2 mb-0">
-            <label for="catalog-add-oras-input" class="form-label small mb-1">
-                Add oras:// entry (registry auto-resolves)
-            </label>
-            <div class="d-flex gap-2">
-                <input type="text" class="form-control form-control-sm font-monospace"
-                       id="catalog-add-oras-input" name="url" required
-                       placeholder="oras://ghcr.io/owner/repo:tag">
-                <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">
-                    <i class="bi bi-plus-circle me-1"></i>Add oras
-                </button>
-            </div>
-        </form>
-    </div>
-</div>
-
-<div class="card mb-3" id="catalog-add">
-    <div class="card-header bg-light fw-semibold py-2">
-        <i class="bi bi-plus-square me-1"></i>Add HTTPS entry
-    </div>
-    <div class="card-body small">
-        <p class="text-muted mb-2">
-            Add one https:// catalog entry. Operators typically fill
-            <em>name</em>, <em>src</em>, and <em>sha256</em>; other
-            fields are optional. For <em>oras://</em> entries use the
-            form above instead (the registry walk fills sha256 /
-            format / size automatically).
-        </p>
-        <form method="post" action="/admin/catalog_add_entry" class="mb-0">
-            <div class="row g-2 mb-2">
-                <div class="col-md-4">
-                    <label class="form-label small mb-1" for="ce-name">Name</label>
-                    <input type="text" class="form-control form-control-sm"
-                           id="ce-name" name="name" required
-                           placeholder="my-appliance-2026.W28">
-                </div>
-                <div class="col-md-8">
-                    <label class="form-label small mb-1" for="ce-src">Source URL</label>
-                    <input type="url" class="form-control form-control-sm font-monospace"
-                           id="ce-src" name="src" required
-                           placeholder="https://example.com/appliance.img.gz">
-                </div>
-            </div>
-            <div class="row g-2 mb-2">
-                <div class="col-md-6">
-                    <label class="form-label small mb-1" for="ce-sha256">SHA-256</label>
-                    <input type="text" class="form-control form-control-sm font-monospace"
-                           id="ce-sha256" name="sha256"
-                           pattern="[0-9a-fA-F]{64}"
-                           placeholder="64-hex, e.g. abcdef0123... (leave blank if unknown)">
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label small mb-1" for="ce-format">Format</label>
-                    <input type="text" class="form-control form-control-sm"
-                           id="ce-format" name="format"
-                           placeholder="img.gz | img.zst | qcow2">
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label small mb-1" for="ce-arch">Arch</label>
-                    <input type="text" class="form-control form-control-sm"
-                           id="ce-arch" name="arch"
-                           placeholder="x86_64 | aarch64">
-                </div>
-            </div>
-            <div class="row g-2 mb-2">
-                <div class="col-md-4">
-                    <label class="form-label small mb-1" for="ce-size">Size (bytes)</label>
-                    <input type="number" min="0" class="form-control form-control-sm"
-                           id="ce-size" name="size_bytes"
-                           placeholder="optional">
-                </div>
-                <div class="col-md-8">
-                    <label class="form-label small mb-1" for="ce-desc">Description</label>
-                    <input type="text" class="form-control form-control-sm"
-                           id="ce-desc" name="description"
-                           placeholder="Optional operator prose (shown on bty's /ui/images)">
-                </div>
-            </div>
-            <button type="submit" class="btn btn-sm btn-primary">
-                <i class="bi bi-plus-circle me-1"></i>Add entry
-            </button>
-        </form>
-    </div>
-</div>
-
 <div class="card mb-3" id="catalog-entries">
-    <div class="card-header bg-light fw-semibold py-2">
-        <i class="bi bi-list-ul me-1"></i>Catalog entries ({{ catalog_entries|length }})
+    <div class="card-header bg-light fw-semibold d-flex flex-wrap align-items-center gap-3 py-2">
+        <span class="text-nowrap"><i class="bi bi-list-ul me-1"></i>Catalog entries</span>
+        <span class="vr"></span>
+        {{ filter_form(q, sort, page, per_page_choices, 'catalog-q', placeholder='Filter (name / URL / format)') }}
+        {{ pagination_inline(page, preserved, label='entries') }}
     </div>
     <div class="table-responsive">
         <table class="table table-striped table-hover mb-0 align-middle">
             <thead class="table-light">
                 <tr>
-                    <th>Name</th>
-                    <th>Source</th>
-                    <th>Format</th>
-                    <th>SHA-256</th>
-                    <th title="When withcache last fetched this entry's bytes to disk. bty's flash chain + nbdmux's export creation both refuse entries with no timestamp here.">Downloaded</th>
+                    {{ sort_header('Name', 'name', sort, preserved) }}
+                    {{ sort_header('Source', 'src', sort, preserved) }}
+                    {{ sort_header('Format', 'format', sort, preserved, 'style="width: 1%; white-space: nowrap;"') }}
+                    <th style="width: 1%; white-space: nowrap;">Size</th>
+                    <th style="width: 1%; white-space: nowrap;" class="text-end"
+                        title="Cached-blob hit count. Bumped every time a client fetches this entry's bytes from withcache.">Hits</th>
+                    {{ sort_header('State', 'downloaded_at', sort, preserved, 'style="min-width: 12rem;" title="Cached / downloading / failed. Downloading shows a live progress bar."') }}
                     <th class="text-end" style="width: 1%; white-space: nowrap;">Actions</th>
                 </tr>
             </thead>
@@ -199,7 +88,7 @@
                 {% for e in catalog_entries %}
                 <tr>
                     <td class="small">{{ e.get('name', '') }}</td>
-                    <td class="small font-monospace text-truncate" style="max-width: 32rem;"
+                    <td class="small font-monospace text-truncate" style="max-width: 30rem;"
                         title="{{ e.get('src') or e.get('url') or '' }}">
                         {{ e.get('src') or e.get('url') or '' }}
                     </td>
@@ -210,14 +99,36 @@
                         <span class="text-muted">-</span>
                         {% endif %}
                     </td>
-                    <td class="small font-monospace">
-                        {% if e.get('sha256') %}{{ e.sha256[:12] }}...{% else %}<span class="text-muted">-</span>{% endif %}
+                    <td class="small font-monospace text-nowrap">
+                        {% if e.get('downloaded_size') %}
+                        {{ e.downloaded_size }}
+                        {% elif e.get('size_bytes') %}
+                        {{ e.size_bytes }}
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
                     </td>
+                    <td class="small text-end">{{ e.get('hits', 0) }}</td>
                     <td class="small">
-                        {% if e.get('active_job_status') %}
-                        <span class="badge bg-info text-dark" title="Download in flight">
-                            <i class="bi bi-arrow-down-circle me-1"></i>{{ e.active_job_status }}
+                        {% if e.get('active_job_status') in ('queued', 'running') %}
+                        {% set st = e.active_job_status %}
+                        <span class="badge bg-info text-dark d-inline-flex align-items-center gap-1">
+                            <i class="bi bi-arrow-down-circle"></i>{{ st }}
                         </span>
+                        {% if e.get('active_job_bytes_total') and e.active_job_bytes_total > 0 %}
+                        {% set pct = (e.active_job_bytes_done * 100 / e.active_job_bytes_total) | round(1) %}
+                        <div class="progress mt-1" style="height: 0.4rem;" role="progressbar"
+                             aria-valuenow="{{ pct }}" aria-valuemin="0" aria-valuemax="100">
+                            <div class="progress-bar bg-primary" style="width: {{ pct }}%"></div>
+                        </div>
+                        <small class="text-muted">{{ pct }}%</small>
+                        {% endif %}
+                        {% elif e.get('active_job_status') == 'failed' %}
+                        <span class="badge bg-danger" title="{{ e.get('active_job_error') or 'download failed' }}">
+                            <i class="bi bi-exclamation-triangle me-1"></i>failed
+                        </span>
+                        {% elif e.get('active_job_status') == 'cancelled' %}
+                        <span class="badge bg-secondary">cancelled</span>
                         {% elif e.get('downloaded_at') %}
                         <span class="badge bg-success" title="{{ e.downloaded_at }}">
                             <i class="bi bi-check-circle me-1"></i>cached
@@ -227,29 +138,32 @@
                         {% endif %}
                     </td>
                     <td class="text-end text-nowrap">
-                        {# Download / Redownload: enqueue an explicit fetch
-                           of this entry's src into the local cache. The
-                           button label switches on ``downloaded_at`` so
-                           the operator sees whether the click will fill
-                           an empty slot or replace stale bytes. #}
+                        {% if e.get('active_job_status') in ('queued', 'running') %}
+                        <form method="post" action="/admin/cancel_entry" class="d-inline m-0">
+                            <input type="hidden" name="name" value="{{ e.get('name', '') }}">
+                            <button type="submit" class="btn btn-sm btn-outline-warning"
+                                    title="Cancel this download">
+                                <i class="bi bi-x-circle"></i>
+                            </button>
+                        </form>
+                        {% else %}
                         <form method="post" action="/admin/catalog_download_entry"
                               class="d-inline m-0">
                             <input type="hidden" name="name" value="{{ e.get('name', '') }}">
                             {% if e.get('downloaded_at') %}
                             <input type="hidden" name="force" value="1">
                             <button type="submit" class="btn btn-sm btn-outline-primary"
-                                    title="Delete the cached bytes and refetch from origin"
-                                    {% if e.get('active_job_status') %}disabled{% endif %}>
-                                <i class="bi bi-arrow-repeat"></i> Redownload
+                                    title="Delete the cached bytes and refetch from origin">
+                                <i class="bi bi-arrow-repeat"></i>
                             </button>
                             {% else %}
                             <button type="submit" class="btn btn-sm btn-primary"
-                                    title="Fetch this entry's bytes into the local cache"
-                                    {% if e.get('active_job_status') %}disabled{% endif %}>
-                                <i class="bi bi-download"></i> Download
+                                    title="Fetch this entry's bytes into the local cache">
+                                <i class="bi bi-download"></i>
                             </button>
                             {% endif %}
                         </form>
+                        {% endif %}
                         <form method="post" action="/admin/catalog_delete_entry"
                               class="d-inline m-0"
                               onsubmit="return confirm('Delete catalog entry {{ e.get('name', '') }}?');">
@@ -263,9 +177,15 @@
                 </tr>
                 {% endfor %}
                 {% if not catalog_entries %}
-                <tr><td colspan="6" class="text-muted text-center py-3">
-                    No catalog entries yet. The startup fetch will populate
-                    this list; failures land in the source card above.
+                <tr><td colspan="7" class="text-muted text-center py-3">
+                    {% if q %}
+                    No entries match <code>{{ q }}</code>.
+                    {% else %}
+                    No catalog entries yet. Add an ORAS or HTTPS URL
+                    on the subnav, or click Fetch default to populate
+                    from the configured source (Settings &rarr;
+                    Catalog source).
+                    {% endif %}
                 </td></tr>
                 {% endif %}
             </tbody>

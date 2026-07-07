@@ -1,9 +1,8 @@
-"""TestClient tests for /ui/cached, /ui/downloads, /ui/misses,
-/ui/catalog, /ui/settings.
+"""TestClient tests for the operator UI pages.
 
-Third checkpoint of the v0.9.0 port. Read-only shape for all
-five operator pages; admin forms + persistence follow in the
-next PR.
+Since v0.12.0 the pages are /ui/dashboard, /ui/catalog, /ui/misses,
+/ui/settings. The retired /ui/cached + /ui/downloads folded into
+Catalog (hits + per-row download progress).
 """
 
 from __future__ import annotations
@@ -81,24 +80,19 @@ class _PagesBase(unittest.TestCase):
             )
 
 
-class CachedPageTests(_PagesBase):
-    def test_renders_empty_state(self) -> None:
-        body = self.client.get("/ui/cached").text
-        self.assertIn("No cached blobs yet", body)
+class DashboardPageTests(_PagesBase):
+    def test_renders_summary_cards(self) -> None:
+        body = self.client.get("/ui/dashboard").text
         self.assertIn("WITHCACHE", body)
         self.assertIn("brand-accent", body)
+        self.assertIn("Catalog", body)
+        self.assertIn("Recent misses", body)
+        # Health check list has the label copy
+        self.assertIn("Catalog source", body)
 
-    def test_renders_row_for_seeded_blob(self) -> None:
-        url = "https://example.invalid/one.img.gz"
-        self._seed_blob(url, b"some payload data" * 10)
-        body = self.client.get("/ui/cached").text
-        self.assertIn(url, body)
-
-
-class DownloadsPageTests(_PagesBase):
-    def test_renders_empty_state(self) -> None:
-        body = self.client.get("/ui/downloads").text
-        self.assertIn("No download jobs", body)
+    def test_dashboard_flags_no_recent_misses(self) -> None:
+        body = self.client.get("/ui/dashboard").text
+        self.assertIn("No recorded misses yet", body)
 
 
 class MissesPageTests(_PagesBase):
@@ -112,9 +106,16 @@ class MissesPageTests(_PagesBase):
         body = self.client.get("/ui/misses").text
         self.assertIn(url, body)
 
+    def test_filter_narrows_results(self) -> None:
+        self.app.state.store.record_miss("https://example.invalid/keep.bin")
+        self.app.state.store.record_miss("https://example.invalid/drop.bin")
+        body = self.client.get("/ui/misses?q=keep").text
+        self.assertIn("keep.bin", body)
+        self.assertNotIn("drop.bin", body)
+
 
 class CatalogPageTests(_PagesBase):
-    def test_renders_effective_url_and_entries(self) -> None:
+    def test_renders_entries_and_fetched_at(self) -> None:
         self.catalog.entries = [
             {
                 "name": "demo.img.gz",
@@ -124,20 +125,37 @@ class CatalogPageTests(_PagesBase):
         ]
         self.catalog.fetched_at = "2026-07-05T12:00:00Z"
         body = self.client.get("/ui/catalog").text
-        self.assertIn("https://example.invalid/catalog.toml", body)
         self.assertIn("demo.img.gz", body)
-        self.assertIn("2026-07-05T12:00:00Z", body)
 
     def test_renders_error_when_last_error_set(self) -> None:
         self.catalog.last_error = "upstream 503 no gateway"
         body = self.client.get("/ui/catalog").text
         self.assertIn("upstream 503 no gateway", body)
 
+    def test_subnav_has_three_inline_actions(self) -> None:
+        body = self.client.get("/ui/catalog").text
+        # Three inline forms live in the subnav strip
+        self.assertIn('action="/admin/catalog_add_oras"', body)
+        self.assertIn('action="/admin/catalog_add_entry"', body)
+        self.assertIn('action="/admin/catalog_refresh"', body)
+        self.assertIn("Add ORAS", body)
+        self.assertIn("Add HTTPS", body)
+        self.assertIn("Fetch default", body)
+
+    def test_filter_narrows_entries(self) -> None:
+        self.catalog.entries = [
+            {"name": "keeper.img.gz", "src": "https://example.invalid/keeper.img.gz"},
+            {"name": "reject.img.gz", "src": "https://example.invalid/reject.img.gz"},
+        ]
+        body = self.client.get("/ui/catalog?q=keeper").text
+        self.assertIn("keeper.img.gz", body)
+        self.assertNotIn("reject.img.gz", body)
+
 
 class SettingsPageTests(_PagesBase):
-    def test_renders_all_four_cards_with_subnav_anchors(self) -> None:
+    def test_renders_all_cards_with_subnav_anchors(self) -> None:
         body = self.client.get("/ui/settings").text
-        for anchor in ("identity", "paths", "catalog", "auth"):
+        for anchor in ("identity", "paths", "catalog", "logging", "auth"):
             with self.subTest(anchor=anchor):
                 self.assertIn(f'id="{anchor}"', body)
                 self.assertIn(f'href="#{anchor}"', body)
@@ -146,9 +164,12 @@ class SettingsPageTests(_PagesBase):
         body = self.client.get("/ui/settings").text
         self.assertIn("open mode", body)
 
-    def test_shows_catalog_url(self) -> None:
+    def test_shows_catalog_source_form(self) -> None:
         body = self.client.get("/ui/settings").text
         self.assertIn("https://example.invalid/catalog.toml", body)
+        # Editable form + Fetch default action live on Settings now.
+        self.assertIn('action="/admin/catalog_set_url"', body)
+        self.assertIn("Fetch default catalog", body)
 
 
 class AuthGateTests(_PagesBase):
@@ -165,8 +186,7 @@ class AuthGateTests(_PagesBase):
 
     def test_all_pages_redirect_to_login_when_unauth(self) -> None:
         for path in (
-            "/ui/cached",
-            "/ui/downloads",
+            "/ui/dashboard",
             "/ui/misses",
             "/ui/catalog",
             "/ui/settings",

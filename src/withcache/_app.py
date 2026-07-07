@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, _settings_store
+from . import __version__, _settings_store, _table_state
 from ._api import _persist_catalog, register_api_routes
 from .server import (
     DEFAULT_CATALOG_URL,
@@ -57,13 +57,19 @@ class NotAuthenticated(Exception):
 def _build_jinja(templates_dir: Path) -> Environment:
     """Configure the Jinja environment. Autoescape on for all
     templates so operator-supplied strings can't inject markup.
-    Same shape as nbdmux + bty."""
-    return Environment(
+    ``build_query_string`` + ``per_page_choices`` are exposed as
+    globals so ``ui/_table_macros.html`` renders without threading
+    them through every ``render()`` call. Same shape as nbdmux +
+    bty."""
+    env = Environment(
         loader=FileSystemLoader(str(templates_dir)),
         autoescape=True,
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    env.globals["build_query_string"] = _table_state.build_query_string
+    env.globals["per_page_choices"] = list(_table_state.PER_PAGE_CHOICES)
+    return env
 
 
 def create_app(
@@ -240,7 +246,7 @@ def create_app(
     def ui_login_form(request: Request, error: str | None = None) -> HTMLResponse:
         if request.session.get(SESSION_AUTHED_KEY):
             return RedirectResponse(  # type: ignore[return-value]
-                url="/ui/cached", status_code=status.HTTP_303_SEE_OTHER
+                url="/ui/dashboard", status_code=status.HTTP_303_SEE_OTHER
             )
         return render("ui/login.html", request, error=error)
 
@@ -249,7 +255,7 @@ def create_app(
         if not auth.check_password(password):
             return render("ui/login.html", request, error="Invalid password.")
         request.session[SESSION_AUTHED_KEY] = True
-        return RedirectResponse(url="/ui/cached", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(url="/ui/dashboard", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/ui/logout")
     def ui_logout(request: Request) -> RedirectResponse:
@@ -260,64 +266,183 @@ def create_app(
 
     @app.get("/")
     def _root() -> RedirectResponse:
-        return RedirectResponse(url="/ui/cached", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(url="/ui/dashboard", status_code=status.HTTP_303_SEE_OTHER)
 
-    @app.get("/ui/cached", response_class=HTMLResponse)
-    def ui_cached(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
-        """Cached blobs view: one row per cached artifact with URL,
-        size, sha short, hit count, and last-fetch timestamp. Reads
-        ``app.state.store.list_blobs`` (sorted newest-first)."""
-        rows = app.state.store.list_blobs()
-        total_bytes = app.state.store.total_size()
-        return render(
-            "ui/cached.html",
-            request,
-            nav_active="cached",
-            rows=rows,
-            total_bytes=total_bytes,
-            row_count=len(rows),
-        )
-
-    @app.get("/ui/downloads", response_class=HTMLResponse)
-    def ui_downloads(
+    @app.get("/ui/dashboard", response_class=HTMLResponse)
+    def ui_dashboard(
         request: Request, _auth_check: None = Depends(require_ui_auth)
     ) -> HTMLResponse:
-        """DownloadManager jobs view: queued / running / completed /
-        failed / cancelled, with a progress bar for jobs that report
-        Content-Length. Reads ``app.state.mgr.list``."""
-        jobs = app.state.mgr.list() if hasattr(app.state.mgr, "list") else []
-        return render("ui/downloads.html", request, nav_active="downloads", jobs=jobs)
-
-    @app.get("/ui/misses", response_class=HTMLResponse)
-    def ui_misses(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
-        """Recorded cache misses: URL, count, first-seen, last-seen.
-        Reads ``app.state.store.list_misses`` (sorted by last-seen)."""
-        rows = app.state.store.list_misses()
-        return render("ui/misses.html", request, nav_active="misses", rows=rows)
-
-    @app.get("/ui/catalog", response_class=HTMLResponse)
-    def ui_catalog(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
-        """Catalog view: current URL + env pin + on-disk override
-        provenance, plus the entries table. Refresh + Set URL +
-        Add oras + Download + Delete are on the subnav / row forms.
-
-        Every entry is enriched with ``downloaded_at`` from the
-        store (or ``None``) + an ``active_job_status`` flag from
-        the DownloadManager so the row's Downloaded pill shows
-        "-" / "queued" / "running" / "cached" without a separate
-        polling round-trip. Same shape ``GET /catalog`` returns to
-        the JSON clients.
-        """
+        """Withcache landing page: catalog + cache + activity summary
+        at a glance. Same shape as bty's dashboard (jump-link subnav,
+        cards for counts, health check pills, recent misses)."""
         cs: CatalogState = app.state.catalog
         store = app.state.store
         mgr = app.state.mgr
-        # Map url -> latest job status for anything currently
-        # pending / running. Keeps the template cheap: it just
-        # renders a small pill without knowing the pipeline shape.
-        pending: dict[str, str] = {}
-        for job in mgr.list():
-            if job.status in ("queued", "running") and job.url not in pending:
-                pending[job.url] = job.status
+        entries_total = len(cs.entries)
+        # A cache row lives only when the blob file is present; the
+        # store's ``get_blob`` already gates on existence.
+        entries_cached = 0
+        for entry in cs.entries:
+            fetch_url = entry.get("resolved_src") or entry.get("src") or ""
+            if fetch_url and store.get_blob(fetch_url) is not None:
+                entries_cached += 1
+        blob_count, miss_count = store.counts()
+        cached_bytes = store.total_size()
+        jobs = mgr.list() if hasattr(mgr, "list") else []
+        active_jobs = sum(1 for j in jobs if j.status in ("queued", "running"))
+        failed_jobs = sum(1 for j in jobs if j.status == "failed")
+        recent_misses = list(store.list_misses())[:5]
+
+        sanity: list[dict[str, Any]] = []
+        env_url = (os.environ.get("WITHCACHE_CATALOG_URL") or "").strip()
+        sanity.append(
+            {
+                "label": "Catalog source",
+                "ok": bool(cs.url),
+                "info": False,
+                "detail": (cs.url or "(unset)") + (" (env pin)" if env_url else ""),
+                "href": "/ui/settings#catalog",
+            }
+        )
+        sanity.append(
+            {
+                "label": "Catalog fetch",
+                "ok": not cs.last_error,
+                "info": False,
+                "detail": cs.last_error or (cs.fetched_at or "not fetched yet"),
+                "href": "/ui/settings#catalog",
+                "fix_href": "/ui/settings#catalog",
+            }
+        )
+        sanity.append(
+            {
+                "label": "Downloads",
+                "ok": failed_jobs == 0,
+                "info": False,
+                "detail": (
+                    f"{active_jobs} in flight, {failed_jobs} failed"
+                    if (active_jobs or failed_jobs)
+                    else "idle"
+                ),
+                "href": "/ui/catalog",
+                "fix_href": "/ui/catalog",
+            }
+        )
+        sanity.append(
+            {
+                "label": "Recorded misses",
+                "info": True,
+                "ok": True,
+                "detail": (
+                    f"{miss_count} URL{'s' if miss_count != 1 else ''} not in the catalog"
+                    if miss_count
+                    else "no misses recorded"
+                ),
+                "href": "/ui/misses",
+            }
+        )
+
+        return render(
+            "ui/dashboard.html",
+            request,
+            nav_active="dashboard",
+            entries_total=entries_total,
+            entries_cached=entries_cached,
+            blob_count=blob_count,
+            cached_bytes=cached_bytes,
+            miss_count=miss_count,
+            active_jobs=active_jobs,
+            failed_jobs=failed_jobs,
+            recent_misses=recent_misses,
+            sanity=sanity,
+            catalog_url=cs.url,
+        )
+
+    def _latest_job_by_url(mgr_jobs: list[Any]) -> dict[str, Any]:
+        """Reduce ``mgr.list()`` to the newest job per URL. Used by the
+        Catalog page to surface the last download's status + progress
+        against the matching entry (queued / running / failed /
+        cancelled). Completed jobs are folded into the ``downloaded_at``
+        pill via the store row and don't need a separate entry."""
+        latest: dict[str, Any] = {}
+        for job in mgr_jobs:
+            prev = latest.get(job.url)
+            # The DownloadManager doesn't stamp jobs with a monotonic
+            # id we can trust across restarts; but iteration order is
+            # append-order so the last write wins, matching "latest".
+            latest[job.url] = job if prev is None else job
+        return latest
+
+    @app.get("/ui/misses", response_class=HTMLResponse)
+    def ui_misses(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
+        """Recorded cache misses (URL, count, first-seen, last-seen),
+        with client-side filter + per-page selector matching the bty
+        table pattern. Server-side sort/pagination lives on the URL
+        so the view is bookmarkable."""
+        params = dict(request.query_params)
+        allowed_sort = {
+            "url": "url",
+            "count": "count",
+            "first_seen": "first_seen",
+            "last_seen": "last_seen",
+        }
+        sort = _table_state.parse_sort(
+            params,
+            allowed=allowed_sort,
+            default_column="last_seen",
+            default_direction="desc",
+        )
+        q = (params.get("q") or "").strip().lower()
+        all_rows = list(app.state.store.list_misses())
+        if q:
+            all_rows = [r for r in all_rows if q in (r["url"] or "").lower()]
+        reverse = sort.direction == "desc"
+        all_rows.sort(key=lambda r: r[sort.column] or "", reverse=reverse)
+        page = _table_state.parse_pagination(params, total=len(all_rows))
+        rows = all_rows[page.offset : page.offset + page.per_page]
+        preserved = {
+            "q": q or None,
+            "sort": sort.column,
+            "dir": sort.direction,
+            "per_page": str(page.per_page)
+            if page.per_page != _table_state.DEFAULT_PER_PAGE
+            else None,
+        }
+        return render(
+            "ui/misses.html",
+            request,
+            nav_active="misses",
+            rows=rows,
+            q=q,
+            sort=sort,
+            page=page,
+            preserved=preserved,
+        )
+
+    @app.get("/ui/catalog", response_class=HTMLResponse)
+    def ui_catalog(request: Request, _auth_check: None = Depends(require_ui_auth)) -> HTMLResponse:
+        """Catalog view: entries table with per-row cache + download
+        state folded in. The retired Cached + Downloads tabs surface
+        their signal here now:
+
+        - ``hits`` (from ``store.get_blob`` blob row): how many times
+          bty / clients pulled these bytes since the entry cached.
+        - ``downloaded_at`` + ``downloaded_size``: presence of a
+          store row is the "cached" signal.
+        - ``active_job_status`` + ``active_job_progress``: newest
+          DownloadManager job for this entry's URL so a running
+          fetch renders a live progress pill without a separate tab.
+
+        Client-side filter + per-page selector matching bty. The
+        catalog source URL editor moved to ``/ui/settings#catalog``
+        in v0.12.0.
+        """
+        params = dict(request.query_params)
+        cs: CatalogState = app.state.catalog
+        store = app.state.store
+        mgr = app.state.mgr
+
+        jobs_by_url = _latest_job_by_url(mgr.list() if hasattr(mgr, "list") else [])
         enriched: list[dict[str, Any]] = []
         for entry in cs.entries:
             row = {**entry}
@@ -325,18 +450,61 @@ def create_app(
             blob = store.get_blob(fetch_url) if fetch_url else None
             row["downloaded_at"] = blob["fetched_at"] if blob else None
             row["downloaded_size"] = int(blob["size"]) if blob else None
-            row["active_job_status"] = pending.get(fetch_url)
+            row["hits"] = int(blob["hits"]) if blob else 0
+            job = jobs_by_url.get(fetch_url)
+            row["active_job_status"] = job.status if job else None
+            row["active_job_error"] = getattr(job, "error", None) if job else None
+            row["active_job_bytes_done"] = getattr(job, "bytes_done", 0) if job else 0
+            row["active_job_bytes_total"] = getattr(job, "bytes_total", 0) if job else 0
+            row["_src_lower"] = (row.get("src") or row.get("url") or "").lower()
+            row["_name_lower"] = (row.get("name") or "").lower()
+            row["_format_lower"] = (row.get("format") or "").lower()
             enriched.append(row)
+
+        q = (params.get("q") or "").strip().lower()
+        if q:
+            enriched = [
+                r
+                for r in enriched
+                if q in r["_name_lower"] or q in r["_src_lower"] or q in r["_format_lower"]
+            ]
+        allowed_sort = {
+            "name": "name",
+            "src": "_src_lower",
+            "format": "_format_lower",
+            "downloaded_at": "downloaded_at",
+        }
+        sort = _table_state.parse_sort(
+            params,
+            allowed=allowed_sort,
+            default_column="name",
+            default_direction="asc",
+        )
+        reverse = sort.direction == "desc"
+        sort_key = allowed_sort[sort.column]
+        enriched.sort(key=lambda r: r.get(sort_key) or "", reverse=reverse)
+        page = _table_state.parse_pagination(params, total=len(enriched))
+        entries = enriched[page.offset : page.offset + page.per_page]
+        preserved = {
+            "q": q or None,
+            "sort": sort.column,
+            "dir": sort.direction,
+            "per_page": str(page.per_page)
+            if page.per_page != _table_state.DEFAULT_PER_PAGE
+            else None,
+        }
         return render(
             "ui/catalog.html",
             request,
             nav_active="catalog",
-            catalog_url=cs.url,
-            catalog_env_url=cs.env_url,
-            catalog_entries=enriched,
+            catalog_entries=entries,
             catalog_fetched_at=cs.fetched_at,
             catalog_last_error=cs.last_error,
             catalog_last_info=cs.last_info,
+            q=q,
+            sort=sort,
+            page=page,
+            preserved=preserved,
         )
 
     @app.get("/ui/settings", response_class=HTMLResponse)
@@ -366,13 +534,17 @@ def create_app(
         flash_map = {"logging": "Logging settings saved."}
         flash = error if error else flash_map.get(saved or "")
         flash_kind = "danger" if error else ("success" if flash else None)
+        cs: CatalogState = app.state.catalog
         return render(
             "ui/settings.html",
             request,
             nav_active="settings",
             data_dir=data_dir_str,
-            catalog_url=app.state.catalog.url,
-            catalog_env_url=app.state.catalog.env_url,
+            catalog_url=cs.url,
+            catalog_env_url=cs.env_url,
+            catalog_fetched_at=cs.fetched_at,
+            catalog_last_error=cs.last_error,
+            catalog_last_info=cs.last_info,
             max_bytes=max_bytes,
             auth_enabled=auth.enabled,
             session_secret_from_env=session_secret_from_env,
@@ -429,6 +601,47 @@ def create_app(
     # JSON /blob + /b/ byte-serving routes stay open (bty polls from
     # a sibling container) but writes gate on the session cookie.
 
+    def _promote_url_to_catalog(u: str) -> dict[str, Any] | None:
+        """Common promote-a-URL-into-a-catalog-entry helper shared by
+        ``/admin/fetch`` (Misses page) and ``/admin/catalog_add_entry``
+        (Catalog subnav). Returns the newly-created entry or ``None``
+        if one already exists for this URL.
+
+        The name is derived from the URL basename with a
+        ``misses-<sha12>`` fallback when the path is empty (bare host
+        + slash); collisions add a numeric suffix. ``format`` is
+        inferred from a known compressor suffix when present; other
+        catalog fields stay unset until the operator hits Download
+        (sha256, size arrive from the store row on subsequent
+        renders)."""
+        import urllib.parse as _urlparse
+
+        cs: CatalogState = app.state.catalog
+        already = next(
+            (e for e in cs.entries if (e.get("resolved_src") or e.get("src")) == u),
+            None,
+        )
+        if already is not None:
+            return None
+        parsed = _urlparse.urlsplit(u)
+        basename = _urlparse.unquote(parsed.path.rsplit("/", 1)[-1] or "")
+        if not basename:
+            basename = f"misses-{hashlib.sha256(u.encode('utf-8')).hexdigest()[:12]}"
+        candidate = basename
+        existing_names = {e.get("name") for e in cs.entries}
+        suffix = 2
+        while candidate in existing_names:
+            candidate = f"{basename}-{suffix}"
+            suffix += 1
+        entry: dict[str, Any] = {"name": candidate, "src": u, "resolved_src": u}
+        for _ext in (".img.zst", ".img.gz", ".img.xz", ".iso.gz", ".iso.xz", ".img", ".iso"):
+            if basename.endswith(_ext):
+                entry["format"] = _ext.lstrip(".")
+                break
+        cs.entries.append(entry)
+        _persist_catalog(cs)
+        return entry
+
     @app.post("/admin/fetch")
     def ui_admin_fetch(
         url: str = Form(""),
@@ -442,46 +655,18 @@ def create_app(
         catalog entry that trio consumers (bty, nbdmux) can see as
         soon as its bytes land.
 
-        The catalog name is auto-generated from the URL basename
-        (sanitised); when a collision would occur, a short suffix
-        derived from the URL keeps the name unique. Optional
-        ``header`` carries a curated authorization payload parsed
-        by :func:`withcache.server.parse_headers` so a token-gated
-        origin can be fetched.
-
-        No-op with a redirect when the URL is blank."""
-        import urllib.parse as _urlparse
-
+        Optional ``header`` carries a curated authorization payload
+        parsed by :func:`withcache.server.parse_headers` so a
+        token-gated origin can be fetched. No-op with a redirect
+        when the URL is blank."""
         from .server import parse_headers
 
         u = (url or "").strip()
         if not u:
             return RedirectResponse(url="/ui/misses", status_code=status.HTTP_303_SEE_OTHER)
-
-        cs: CatalogState = app.state.catalog
-        already = next(
-            (e for e in cs.entries if (e.get("resolved_src") or e.get("src")) == u),
-            None,
-        )
-        if already is None:
-            # Derive a catalog name from the URL basename; fall back
-            # to the sha of the URL when the basename is empty
-            # (bare host + trailing slash).
-            parsed = _urlparse.urlsplit(u)
-            basename = _urlparse.unquote(parsed.path.rsplit("/", 1)[-1] or "")
-            if not basename:
-                basename = f"misses-{hashlib.sha256(u.encode('utf-8')).hexdigest()[:12]}"
-            candidate = basename
-            existing_names = {e.get("name") for e in cs.entries}
-            suffix = 2
-            while candidate in existing_names:
-                candidate = f"{basename}-{suffix}"
-                suffix += 1
-            entry: dict[str, Any] = {"name": candidate, "src": u, "resolved_src": u}
-            cs.entries.append(entry)
-            _persist_catalog(cs)
+        _promote_url_to_catalog(u)
         app.state.mgr.enqueue(u, headers=parse_headers(header or ""))
-        return RedirectResponse(url="/ui/downloads", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/dismiss")
     def ui_admin_dismiss(
@@ -493,39 +678,35 @@ def create_app(
             app.state.store.dismiss(k)
         return RedirectResponse(url="/ui/misses", status_code=status.HTTP_303_SEE_OTHER)
 
-    @app.post("/admin/delete")
-    def ui_admin_delete_blob(
-        key: str = Form(""),
+    @app.post("/admin/cancel_entry")
+    def ui_admin_cancel_entry(
+        name: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        k = (key or "").strip()
-        if k:
-            app.state.store.delete_blob(k)
-        return RedirectResponse(url="/ui/cached", status_code=status.HTTP_303_SEE_OTHER)
-
-    @app.post("/admin/cancel")
-    def ui_admin_cancel(
-        id: str = Form(""),
-        _auth_check: None = Depends(require_ui_auth),
-    ) -> RedirectResponse:
-        jid = (id or "").strip()
-        if jid.isdigit():
-            app.state.mgr.cancel(int(jid))
-        return RedirectResponse(url="/ui/downloads", status_code=status.HTTP_303_SEE_OTHER)
-
-    @app.post("/admin/clear")
-    def ui_admin_clear(
-        _auth_check: None = Depends(require_ui_auth),
-    ) -> RedirectResponse:
-        app.state.mgr.clear_finished()
-        return RedirectResponse(url="/ui/downloads", status_code=status.HTTP_303_SEE_OTHER)
+        """Cancel the newest in-flight DownloadManager job for the
+        named catalog entry. No-op when the entry is unknown or
+        nothing is queued/running for its URL."""
+        cs: CatalogState = app.state.catalog
+        entry = next((e for e in cs.entries if e.get("name") == (name or "").strip()), None)
+        if entry is not None:
+            fetch_url = entry.get("resolved_src") or entry.get("src") or ""
+            for job in app.state.mgr.list():
+                if job.url == fetch_url and job.status in ("queued", "running"):
+                    app.state.mgr.cancel(job.id)
+                    break
+        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_refresh")
     def ui_admin_catalog_refresh(
+        next: str = Form("catalog"),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
+        """Re-fetch the currently-configured catalog source and
+        re-parse entries. Callers pass ``next=catalog|settings`` so
+        the 303 lands the operator back where they clicked."""
         app.state.catalog.fetch_now()
-        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        target = "/ui/settings" if (next or "").strip() == "settings" else "/ui/catalog"
+        return RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_set_url")
     def ui_admin_catalog_set_url(
@@ -535,13 +716,14 @@ def create_app(
         """Persist an operator override for the catalog URL. Success
         triggers an immediate fetch so the entries table reflects the
         new source without a second click. Failure records the reason
-        on ``catalog.last_error`` and the Catalog page surfaces it."""
+        on ``catalog.last_error`` and the Settings page surfaces it.
+        The form lives on ``/ui/settings`` since v0.12.0."""
         ok, msg = app.state.catalog.set_url_override(url or "")
         if ok:
             app.state.catalog.fetch_now()
         else:
             app.state.catalog.last_error = msg
-        return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse(url="/ui/settings", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_add_oras")
     def ui_admin_catalog_add_oras(
@@ -553,52 +735,38 @@ def create_app(
 
     @app.post("/admin/catalog_add_entry")
     def ui_admin_catalog_add_entry(
-        name: str = Form(""),
-        src: str = Form(""),
-        sha256: str = Form(""),
-        format: str = Form(""),
-        arch: str = Form(""),
-        size_bytes: str = Form(""),
-        description: str = Form(""),
+        url: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        """Full-shape add-entry form for the browser. Reuses the same
-        allowlist as the JSON ``POST /catalog/entries`` endpoint;
-        empty fields are dropped so the emitter doesn't persist them.
-        Validation errors surface as ``catalog.last_error`` and the
-        Catalog page renders them; happy path 303s back to
-        /ui/catalog with the entry visible in the table."""
-        cs: CatalogState = app.state.catalog
-        _name = name.strip()
-        _src = src.strip()
-        if not _name or not _src:
-            cs.last_error = "name and src are required"
-            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
-        if any(e.get("name") == _name for e in cs.entries):
-            cs.last_error = f"catalog entry with name={_name!r} already exists"
-            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
-        entry: dict[str, Any] = {"name": _name, "src": _src}
-        for key, val in (
-            ("sha256", sha256.strip()),
-            ("format", format.strip()),
-            ("arch", arch.strip()),
-            ("description", description.strip()),
-        ):
-            if val:
-                entry[key] = val
-        sb = size_bytes.strip()
-        if sb:
-            try:
-                entry["size_bytes"] = int(sb)
-            except ValueError:
-                cs.last_error = f"size_bytes must be an integer, got {sb!r}"
-                return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
-        cs.entries.append(entry)
-        cs.last_error = None
-        # Persist to disk so the entry survives a restart.
-        from ._api import _persist_catalog
+        """URL-only add-entry form for the Catalog subnav. Derives the
+        catalog name from the URL basename (with a numeric collision
+        suffix) and the ``format`` from a known compressor suffix
+        when present. Empty submits are refused with a
+        ``catalog.last_error`` note; other fields (sha256, arch,
+        size, description) stay unset until the operator hits
+        Download and the store row supplies size / hash. Same
+        promote-a-URL helper the Misses page's Fetch button uses,
+        minus the auto-download step.
 
-        _persist_catalog(cs)
+        For ``oras://`` sources use ``/admin/catalog_add_oras``
+        instead; the registry walk fills ``format`` + ``size``
+        from the manifest."""
+        cs: CatalogState = app.state.catalog
+        u = (url or "").strip()
+        if not u:
+            cs.last_error = "url is required"
+            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        if u.startswith("oras://"):
+            cs.last_error = "use Add ORAS for oras:// sources"
+            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        if not (u.startswith("http://") or u.startswith("https://")):
+            cs.last_error = "expected http(s):// URL"
+            return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
+        added = _promote_url_to_catalog(u)
+        if added is None:
+            cs.last_error = f"catalog already has an entry for {u}"
+        else:
+            cs.last_error = ""
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_delete_entry")
