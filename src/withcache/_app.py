@@ -20,7 +20,7 @@ import hashlib
 import os
 import sys
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +108,7 @@ def create_app(
     jinja = _build_jinja(_TEMPLATES_DIR)
 
     @contextlib.asynccontextmanager
-    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         """Start-of-request-cycle wiring for the daemon path.
 
         Fires only when ``run_lifecycle=True`` (``server.main`` boots
