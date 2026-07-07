@@ -1,9 +1,13 @@
 """TestClient tests for the /admin/* form-encoded routes.
 
-Fifth checkpoint of the v0.9.0 port. Pins the operator-UI action
-flows: each form POST calls the same underlying method the
-pre-port stdlib Handler dispatched, then 303s to the appropriate
-/ui/* target. Auth-gate mirrors the JSON API semantics.
+Pins the operator-UI action flows: each form POST calls the same
+underlying method the pre-port stdlib Handler dispatched, then 303s
+to the appropriate /ui/* target. Auth-gate mirrors the JSON API
+semantics.
+
+Since v0.12.0 the /ui/cached + /ui/downloads pages are retired;
+their affordances fold into the Catalog page (cache hits + progress
+per entry) so the corresponding admin routes were retired too.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime
+from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -43,23 +48,23 @@ class _AdminBase(unittest.TestCase):
             os.environ.pop("WITHCACHE_ADMIN_PASSWORD", None)
         os.environ.pop("WITHCACHE_CATALOG_URL", None)
 
-        # Capture-only mgr stub so /admin/fetch + /admin/cancel +
-        # /admin/clear are observable without a worker thread.
+        # Capture-only mgr stub so /admin/fetch is observable without
+        # a worker thread. Newer /admin/cancel_entry walks
+        # ``mgr.list()`` looking for a job matching the entry's URL;
+        # tests inject rows via self.jobs.
         outer = self
         self.mgr_calls: list[tuple[str, dict]] = []
+        self.jobs: list[Any] = []
 
         class _CaptureMgr:
             def enqueue(self, url: str, headers=None):
                 outer.mgr_calls.append(("enqueue", {"url": url, "headers": headers}))
 
-            def cancel(self, jid: int):
+            def cancel(self, jid):
                 outer.mgr_calls.append(("cancel", {"id": jid}))
 
-            def clear_finished(self):
-                outer.mgr_calls.append(("clear_finished", {}))
-
             def list(self):
-                return []
+                return outer.jobs
 
         self.catalog = CatalogState(
             url="https://example.invalid/catalog.toml",
@@ -67,8 +72,6 @@ class _AdminBase(unittest.TestCase):
             env_url="",
             url_override_path=os.path.join(self._tmpdir, "catalog_url"),
         )
-        # Replace fetch_now with a no-op so /admin/catalog_refresh
-        # doesn't try to hit the network in tests.
         self.catalog_fetch_calls = 0
 
         def _fake_fetch_now(**_kw):
@@ -119,35 +122,26 @@ class _AdminBase(unittest.TestCase):
         return key
 
 
-class DownloadActionTests(_AdminBase):
+class FetchButtonTests(_AdminBase):
     def test_fetch_promotes_url_to_catalog_entry_and_enqueues(self) -> None:
-        """Since v0.11.0 the Fetch button on /ui/misses promotes the
-        URL to a first-class catalog entry (auto-generated name from
-        the basename) AND enqueues the download. This lets an
-        operator turn a recurring miss into a permanent, trio-visible
-        catalog entry with one click."""
+        """The Fetch button on /ui/misses promotes the URL to a
+        first-class catalog entry (name from URL basename) AND
+        enqueues the download. Redirects to /ui/catalog since v0.12.0
+        so the operator sees the new entry immediately."""
         r = self.client.post(
             "/admin/fetch",
             data={"url": "https://example.invalid/rocm-6.tar.gz"},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/downloads")
-
-        # Fetch was enqueued.
+        self.assertEqual(r.headers["location"], "/ui/catalog")
         self.assertEqual(len(self.mgr_calls), 1)
         self.assertEqual(self.mgr_calls[0][0], "enqueue")
         self.assertEqual(self.mgr_calls[0][1]["url"], "https://example.invalid/rocm-6.tar.gz")
-
-        # AND the URL landed as a catalog entry.
         names = [e.get("name") for e in self.app.state.catalog.entries]
         self.assertIn("rocm-6.tar.gz", names)
 
     def test_fetch_bare_host_falls_back_to_derived_name(self) -> None:
-        """A URL with no basename (bare host + trailing slash) still
-        yields a stable catalog name derived from a short hash of
-        the URL, so the promote-and-download step never fails on
-        odd inputs."""
         self.client.post(
             "/admin/fetch",
             data={"url": "https://example.invalid/"},
@@ -157,9 +151,6 @@ class DownloadActionTests(_AdminBase):
         self.assertTrue(any(n and n.startswith("misses-") for n in names))
 
     def test_fetch_existing_entry_only_enqueues(self) -> None:
-        """When the URL matches an existing catalog entry's src, we
-        skip the duplicate-add step and just enqueue the download.
-        Idempotent from the operator's perspective."""
         self.app.state.catalog.entries.append(
             {
                 "name": "already-there",
@@ -172,10 +163,8 @@ class DownloadActionTests(_AdminBase):
             data={"url": "https://example.invalid/existing.bin"},
             follow_redirects=False,
         )
-        # Still only one entry with that name; no duplicate.
         matching = [e for e in self.app.state.catalog.entries if e.get("name") == "already-there"]
         self.assertEqual(len(matching), 1)
-        # Download WAS enqueued.
         self.assertEqual(len(self.mgr_calls), 1)
 
     def test_fetch_empty_url_no_op(self) -> None:
@@ -184,33 +173,33 @@ class DownloadActionTests(_AdminBase):
         self.assertEqual(self.mgr_calls, [])
         self.assertEqual(self.app.state.catalog.entries, [])
 
-    def test_cancel_dispatches_int_id(self) -> None:
-        r = self.client.post("/admin/cancel", data={"id": "42"}, follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/downloads")
-        self.assertEqual(self.mgr_calls[0], ("cancel", {"id": 42}))
 
-    def test_cancel_ignores_non_int(self) -> None:
-        self.client.post("/admin/cancel", data={"id": "abc"}, follow_redirects=False)
+class CancelEntryTests(_AdminBase):
+    def test_cancel_entry_cancels_matching_job(self) -> None:
+        """The Cancel button on a Catalog row posts the entry name;
+        the handler walks mgr.list() looking for a queued/running
+        job whose URL matches the entry's src, then cancels it."""
+
+        class _Job:
+            def __init__(self, jid, url, status):
+                self.id = jid
+                self.url = url
+                self.status = status
+
+        url = "https://example.invalid/vm.img.zst"
+        self.app.state.catalog.entries.append({"name": "vm", "src": url, "resolved_src": url})
+        self.jobs = [_Job(7, url, "running")]
+        r = self.client.post("/admin/cancel_entry", data={"name": "vm"}, follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/ui/catalog")
+        self.assertEqual(self.mgr_calls, [("cancel", {"id": 7})])
+
+    def test_cancel_entry_unknown_name_no_op(self) -> None:
+        r = self.client.post(
+            "/admin/cancel_entry", data={"name": "does-not-exist"}, follow_redirects=False
+        )
+        self.assertEqual(r.status_code, 303)
         self.assertEqual(self.mgr_calls, [])
-
-    def test_clear_finished_fires(self) -> None:
-        r = self.client.post("/admin/clear", follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
-        self.assertEqual(self.mgr_calls, [("clear_finished", {})])
-
-
-class BlobActionTests(_AdminBase):
-    def test_delete_removes_row(self) -> None:
-        url = "https://example.invalid/to-delete.bin"
-        key = self._seed_blob(url)
-        r = self.client.post("/admin/delete", data={"key": key}, follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/cached")
-        # Row is gone from the Store.
-        with self.app.state.store.conn() as c:
-            rows = c.execute("SELECT key FROM blobs WHERE key = ?", (key,)).fetchall()
-        self.assertEqual(rows, [])
 
 
 class MissActionTests(_AdminBase):
@@ -227,20 +216,28 @@ class MissActionTests(_AdminBase):
 
 
 class CatalogActionTests(_AdminBase):
-    def test_refresh_calls_fetch_now(self) -> None:
+    def test_refresh_default_redirects_to_catalog(self) -> None:
         r = self.client.post("/admin/catalog_refresh", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/ui/catalog")
         self.assertEqual(self.catalog_fetch_calls, 1)
 
-    def test_set_url_success_triggers_fetch(self) -> None:
+    def test_refresh_next_settings_redirects_to_settings(self) -> None:
+        r = self.client.post(
+            "/admin/catalog_refresh", data={"next": "settings"}, follow_redirects=False
+        )
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/ui/settings")
+        self.assertEqual(self.catalog_fetch_calls, 1)
+
+    def test_set_url_success_triggers_fetch_and_lands_on_settings(self) -> None:
         r = self.client.post(
             "/admin/catalog_set_url",
             data={"url": "https://example.invalid/new-catalog.toml"},
             follow_redirects=False,
         )
         self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/catalog")
+        self.assertEqual(r.headers["location"], "/ui/settings")
         self.assertEqual(self.catalog.url, "https://example.invalid/new-catalog.toml")
         self.assertEqual(self.catalog_fetch_calls, 1)
 
@@ -253,9 +250,60 @@ class CatalogActionTests(_AdminBase):
         )
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/ui/catalog")
-        # add_oras_entry logs into entries when the layer probe
-        # succeeds; failure still records but with an error note.
-        # Either way the redirect target is /ui/catalog.
+
+    def test_add_entry_derives_name_and_format_from_url(self) -> None:
+        """Since v0.12.0 the Add HTTPS form takes only a URL. The
+        handler derives ``name`` from the basename and ``format`` from
+        a known compressor suffix. sha256 + arch + size stay unset
+        until Download populates them."""
+        r = self.client.post(
+            "/admin/catalog_add_entry",
+            data={"url": "https://example.invalid/appliance-2026.W27.img.gz"},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/ui/catalog")
+        self.assertEqual(len(self.catalog.entries), 1)
+        entry = self.catalog.entries[0]
+        self.assertEqual(entry["name"], "appliance-2026.W27.img.gz")
+        self.assertEqual(entry["src"], "https://example.invalid/appliance-2026.W27.img.gz")
+        self.assertEqual(entry["format"], "img.gz")
+        self.assertNotIn("sha256", entry)
+
+    def test_add_entry_empty_url_records_error(self) -> None:
+        r = self.client.post("/admin/catalog_add_entry", data={"url": ""}, follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/ui/catalog")
+        self.assertEqual(self.catalog.entries, [])
+        self.assertIn("url is required", (self.catalog.last_error or "").lower())
+
+    def test_add_entry_refuses_oras_url(self) -> None:
+        r = self.client.post(
+            "/admin/catalog_add_entry",
+            data={"url": "oras://ghcr.io/x/y:tag"},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.catalog.entries, [])
+        self.assertIn("add oras", (self.catalog.last_error or "").lower())
+
+    def test_add_entry_duplicate_url_records_error(self) -> None:
+        self.app.state.catalog.entries.append(
+            {
+                "name": "vm",
+                "src": "https://example.invalid/vm.img.zst",
+                "resolved_src": "https://example.invalid/vm.img.zst",
+            }
+        )
+        r = self.client.post(
+            "/admin/catalog_add_entry",
+            data={"url": "https://example.invalid/vm.img.zst"},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        # Still one entry
+        self.assertEqual(len(self.catalog.entries), 1)
+        self.assertIn("already", (self.catalog.last_error or "").lower())
 
     def test_delete_entry_records_error_when_missing(self) -> None:
         r = self.client.post(
@@ -265,8 +313,6 @@ class CatalogActionTests(_AdminBase):
         )
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/ui/catalog")
-        # last_error surfaces the not-found reason so the Catalog
-        # page's error card catches it.
         self.assertNotEqual(self.catalog.last_error, "")
 
 
@@ -274,17 +320,16 @@ class AuthGatedTests(_AdminBase):
     ENABLE_AUTH = True
 
     def test_all_admin_routes_require_session(self) -> None:
-        # A representative sample -- the require_ui_auth dependency
-        # gates all of them the same way.
+        # A representative sample; require_ui_auth gates all admin
+        # routes the same way.
         for path, data in (
             ("/admin/fetch", {"url": "https://x"}),
             ("/admin/dismiss", {"key": "abc"}),
-            ("/admin/delete", {"key": "abc"}),
-            ("/admin/cancel", {"id": "1"}),
-            ("/admin/clear", {}),
+            ("/admin/cancel_entry", {"name": "x"}),
             ("/admin/catalog_refresh", {}),
             ("/admin/catalog_set_url", {"url": "https://x"}),
             ("/admin/catalog_add_oras", {"url": "oras://x"}),
+            ("/admin/catalog_add_entry", {"url": "https://x/y.img.gz"}),
             ("/admin/catalog_delete_entry", {"name": "x"}),
         ):
             with self.subTest(path=path):

@@ -8,10 +8,10 @@ Pins:
 
 - /healthz returns 200 + JSON body naming service + version
 - /ui/login renders on GET
-- Un-authed /ui/cached 303s to /ui/login
-- / redirects to /ui/cached
+- Un-authed /ui/dashboard 303s to /ui/login
+- / redirects to /ui/dashboard
 - Invalid password re-renders form with error
-- Valid password mints session + reaches /ui/cached
+- Valid password mints session + reaches /ui/dashboard
 - Logout clears session
 
 Written as unittest.TestCase so ``make test`` (``python3 -m
@@ -78,26 +78,26 @@ class FastAPIScaffoldTests(unittest.TestCase):
         self.assertIn('name="password"', body)
         self.assertIn("WITHCACHE_ADMIN_PASSWORD", body)
 
-    def test_ui_cached_without_auth_redirects_to_login(self) -> None:
-        r = self.client.get("/ui/cached")
+    def test_ui_dashboard_without_auth_redirects_to_login(self) -> None:
+        r = self.client.get("/ui/dashboard")
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/ui/login")
 
-    def test_root_redirects_to_cached(self) -> None:
+    def test_root_redirects_to_dashboard(self) -> None:
         r = self.client.get("/")
         self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/cached")
+        self.assertEqual(r.headers["location"], "/ui/dashboard")
 
     def test_ui_login_wrong_password_re_renders_with_error(self) -> None:
         r = self.client.post("/ui/login", data={"password": "not-the-password"})
         self.assertEqual(r.status_code, 200)
         self.assertIn("Invalid password", r.text)
 
-    def test_ui_login_valid_password_sets_session_and_reaches_cached(self) -> None:
+    def test_ui_login_valid_password_sets_session_and_reaches_dashboard(self) -> None:
         r = self.client.post("/ui/login", data={"password": TEST_PASSWORD}, follow_redirects=False)
         self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/ui/cached")
-        r2 = self.client.get("/ui/cached")
+        self.assertEqual(r.headers["location"], "/ui/dashboard")
+        r2 = self.client.get("/ui/dashboard")
         self.assertEqual(r2.status_code, 200)
         self.assertIn("WITHCACHE", r2.text)
         self.assertIn("brand-accent", r2.text)
@@ -107,7 +107,7 @@ class FastAPIScaffoldTests(unittest.TestCase):
         r = self.client.post("/ui/logout", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/ui/login")
-        r2 = self.client.get("/ui/cached")
+        r2 = self.client.get("/ui/dashboard")
         self.assertEqual(r2.status_code, 303)
         self.assertEqual(r2.headers["location"], "/ui/login")
 
