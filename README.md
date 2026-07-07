@@ -222,11 +222,11 @@ Notes & limits (all degrade gracefully; worst case is "no caching, curl still wo
 
 `http://withcache-server:8081/` (Bootstrap 5 + Bootstrap Icons + HTMX, bundled
 offline; matches bty's chrome for a consistent trio) is a five-page dashboard:
-- **Cached** (landing): URL, size, **hits** (times served) and **misses** (times requested before it was cached), SHA-256, fetched-at, each with **Delete** to free space.
-- **Downloads**: live progress bars, `queued/running/completed/cancelled/failed`, **Cancel**, and **Clear finished**. Downloads run in a background worker pool, not in the request, so large pulls never block, modelled on [bty]'s job managers.
+- **Dashboard** (landing): catalog + cache + activity summary, health checklist, and the last N audit events.
+- **Catalog**: image catalog fetched from a nosi-style `catalog.toml` (URL configured on Settings > Catalog source). Add entries via the subnav's inline "Add ORAS" / "Add HTTPS" forms or "Fetch default" button, then **Download** each entry. Rows carry hits, size, download progress (live), and cached/failed pills.
 - **Misses**: URLs clients asked for that aren't downloaded yet. Each with **Fetch** (promotes to a catalog entry AND downloads it) and **Dismiss** (forget it).
-- **Catalog**: image catalog fetched from a nosi-style `catalog.toml` (URL configurable via `$WITHCACHE_CATALOG_URL` or the subnav Set&fetch input); pre-seed by URL via the "Add image from oras" or "Add HTTPS entry" forms, then **Download** each entry.
-- **Settings**: identity + storage paths + catalog source + logging (uvicorn level) + auth.
+- **Events**: append-only audit log with a free-text filter and per-page pagination. Failure rows carry an ack button; the dashboard's Health tripwire flags unacknowledged failures.
+- **Settings**: identity + storage paths + catalog source (editable) + logging (uvicorn level) + auth.
 
 ## Auth
 

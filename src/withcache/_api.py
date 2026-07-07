@@ -22,9 +22,11 @@ v0.11.0) promotes a missed URL to a catalog entry + enqueues the
 Download in one click.
 
 Streaming shape: FastAPI ``StreamingResponse`` with a generator
-that reads chunks from the on-disk blob at 64 KiB reads;
-:class:`StreamRegistry` ticks progress per chunk so the operator
-Downloads page shows in-flight transfers as they run.
+that reads chunks from the on-disk blob at 64 KiB reads. The
+Downloads-page real-time progress tracker was retired in v0.12.0
+along with that page; per-entry download progress now folds into
+the Catalog page's Downloaded column, populated from the
+DownloadManager's job list directly.
 """
 
 from __future__ import annotations
