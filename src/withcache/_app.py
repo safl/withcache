@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, _settings_store, _table_state
+from . import __version__, _events_log, _settings_store, _table_state
 from ._api import _persist_catalog, register_api_routes
 from .server import (
     DEFAULT_CATALOG_URL,
@@ -196,12 +196,46 @@ def create_app(
         )
         cs.load_persisted()
         app.state.catalog = cs
-    # Ensure the settings table exists so the Settings render + save
-    # handlers don't crash on a fresh cache.db.
+    # Ensure the settings + events tables exist so the Settings render
+    # + operator actions don't crash on a fresh cache.db.
     with app.state.store.conn() as _c:
         _settings_store.init(_c)
+        _events_log.init(_c)
 
     register_api_routes(app)
+
+    def _emit(
+        *,
+        kind: str,
+        summary: str,
+        request: Request | None = None,
+        subject_kind: str | None = None,
+        subject_id: str | None = None,
+        actor: str | None = "operator",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """One-shot events emitter used by the UI action handlers.
+        Opens its own connection, records the event, commits, closes.
+        Never raises: any error is swallowed so a bad emit can't
+        break the request that produced it."""
+        try:
+            client_host = None
+            if request is not None and request.client is not None:
+                client_host = _events_log.normalize_ip(request.client.host)
+            with app.state.store.conn() as conn:
+                _events_log.record(
+                    conn,
+                    kind=kind,
+                    summary=summary,
+                    subject_kind=subject_kind,
+                    subject_id=subject_id,
+                    actor=actor,
+                    source_ip=client_host,
+                    details=details,
+                )
+                conn.commit()
+        except Exception:  # noqa: BLE001 -- emit is best-effort
+            pass
 
     def render(name: str, request: Request, **ctx: Any) -> HTMLResponse:
         """Render a Jinja template + always-injected context.
@@ -253,13 +287,34 @@ def create_app(
     @app.post("/ui/login")
     def ui_login_submit(request: Request, password: str = Form(...)) -> Any:
         if not auth.check_password(password):
+            _emit(
+                kind="auth.login.failed",
+                summary="Login attempt with wrong password",
+                request=request,
+                subject_kind="auth",
+                actor="operator",
+            )
             return render("ui/login.html", request, error="Invalid password.")
         request.session[SESSION_AUTHED_KEY] = True
+        _emit(
+            kind="auth.login.succeeded",
+            summary="Operator logged in",
+            request=request,
+            subject_kind="auth",
+            actor="operator",
+        )
         return RedirectResponse(url="/ui/dashboard", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/ui/logout")
     def ui_logout(request: Request) -> RedirectResponse:
         request.session.clear()
+        _emit(
+            kind="auth.logout",
+            summary="Operator logged out",
+            request=request,
+            subject_kind="auth",
+            actor="operator",
+        )
         return RedirectResponse(url="/ui/login", status_code=status.HTTP_303_SEE_OTHER)
 
     # ---------- Root redirect + operator UI pages -----------------------
@@ -291,7 +346,6 @@ def create_app(
         jobs = mgr.list() if hasattr(mgr, "list") else []
         active_jobs = sum(1 for j in jobs if j.status in ("queued", "running"))
         failed_jobs = sum(1 for j in jobs if j.status == "failed")
-        recent_misses = list(store.list_misses())[:5]
 
         sanity: list[dict[str, Any]] = []
         env_url = (os.environ.get("WITHCACHE_CATALOG_URL") or "").strip()
@@ -342,6 +396,23 @@ def create_app(
             }
         )
 
+        with store.conn() as _c:
+            recent_events = _events_log.list_recent(_c)
+            unack_failures = _events_log.count_unacknowledged_failures(_c)
+        if unack_failures:
+            sanity.append(
+                {
+                    "label": "Unacknowledged failures",
+                    "ok": False,
+                    "info": False,
+                    "detail": (
+                        f"{unack_failures} failure event"
+                        f"{'s' if unack_failures != 1 else ''} not yet acknowledged"
+                    ),
+                    "href": "/ui/events?q=failed",
+                    "fix_href": "/ui/events?q=failed",
+                }
+            )
         return render(
             "ui/dashboard.html",
             request,
@@ -353,10 +424,69 @@ def create_app(
             miss_count=miss_count,
             active_jobs=active_jobs,
             failed_jobs=failed_jobs,
-            recent_misses=recent_misses,
+            recent_events=recent_events,
+            recent_events_limit=_events_log.RECENT_EVENTS_LIMIT,
             sanity=sanity,
             catalog_url=cs.url,
         )
+
+    @app.get("/ui/events", response_class=HTMLResponse)
+    def ui_events(
+        request: Request,
+        q: str = "",
+        page: int = 1,
+        per_page: int = 25,
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> HTMLResponse:
+        """Slim audit log view: newest-first, free-text filter,
+        per-page pagination. Same shape as bty's /ui/events."""
+        needle = (q or "").strip()
+        clamped_per_page = (
+            per_page if per_page in _table_state.PER_PAGE_CHOICES else _table_state.DEFAULT_PER_PAGE
+        )
+        clamped_page = max(1, page)
+        with app.state.store.conn() as conn:
+            total = _events_log.count_events(conn, q=needle)
+            page_state = _table_state.parse_pagination(
+                {"page": str(clamped_page), "per_page": str(clamped_per_page)},
+                total=total,
+            )
+            events = _events_log.search_events(
+                conn,
+                q=needle,
+                offset=page_state.offset,
+                limit=page_state.per_page,
+            )
+        preserved = {
+            "q": needle or None,
+            "per_page": (
+                str(page_state.per_page)
+                if page_state.per_page != _table_state.DEFAULT_PER_PAGE
+                else None
+            ),
+        }
+        return render(
+            "ui/events.html",
+            request,
+            nav_active="events",
+            events=events,
+            q=needle,
+            page=page_state,
+            preserved=preserved,
+        )
+
+    @app.post("/admin/events/{event_id}/ack")
+    def ui_admin_ack_event(
+        event_id: int,
+        _auth_check: None = Depends(require_ui_auth),
+    ) -> RedirectResponse:
+        """Mark one event acknowledged. Clears it from the
+        dashboard's unacknowledged-failures tripwire without
+        deleting the row."""
+        with app.state.store.conn() as conn:
+            _events_log.set_acknowledged(conn, event_id, True)
+            conn.commit()
+        return RedirectResponse(url="/ui/events", status_code=status.HTTP_303_SEE_OTHER)
 
     def _latest_job_by_url(mgr_jobs: list[Any]) -> dict[str, Any]:
         """Reduce ``mgr.list()`` to the newest job per URL. Used by the
@@ -560,19 +690,11 @@ def create_app(
 
     @app.post("/admin/settings/logging")
     def ui_admin_settings_logging(
+        request: Request,
         log_level: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        """Persist the Logging card's log-level override. Empty
-        submits clear the row so the resolver falls through to env /
-        default. Invalid values 303 back with ``?error=<msg>`` and
-        DO NOT persist -- rejecting at write time keeps the failure
-        loud rather than deferring it to the next resolve.
-
-        Syncs ``os.environ[WITHCACHE_LOG_LEVEL]`` at save time so
-        code that reads the env var picks up the change without a
-        restart; a cleared override restores whatever env value was
-        present at process start (captured on first save)."""
+        """Persist the Logging card's log-level override."""
         import urllib.parse
 
         ll = (log_level or "").strip().lower()
@@ -588,6 +710,14 @@ def create_app(
                 os.environ[_settings_store.ENV_LOG_LEVEL] = ll
             else:
                 _settings_store.clear(conn, _settings_store.KEY_LOG_LEVEL)
+        _emit(
+            kind="settings.logging.updated",
+            summary=f"Log level set to {ll or '(cleared)'}",
+            request=request,
+            subject_kind="settings",
+            subject_id="logging",
+            details={"log_level": ll or None},
+        )
         return RedirectResponse(
             url="/ui/settings?saved=logging#logging",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -644,113 +774,162 @@ def create_app(
 
     @app.post("/admin/fetch")
     def ui_admin_fetch(
+        request: Request,
         url: str = Form(""),
         header: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
         """Promote a URL to a first-class catalog entry AND enqueue
         its download in one click. Bound to the ``Fetch`` button on
-        the ``/ui/misses`` page: the operator sees a URL clients
-        keep asking for, hits Fetch, and the URL becomes a normal
-        catalog entry that trio consumers (bty, nbdmux) can see as
-        soon as its bytes land.
-
-        Optional ``header`` carries a curated authorization payload
-        parsed by :func:`withcache.server.parse_headers` so a
-        token-gated origin can be fetched. No-op with a redirect
-        when the URL is blank."""
+        the ``/ui/misses`` page."""
         from .server import parse_headers
 
         u = (url or "").strip()
         if not u:
             return RedirectResponse(url="/ui/misses", status_code=status.HTTP_303_SEE_OTHER)
-        _promote_url_to_catalog(u)
+        added = _promote_url_to_catalog(u)
         app.state.mgr.enqueue(u, headers=parse_headers(header or ""))
+        if added is not None:
+            _emit(
+                kind="catalog.entry.added",
+                summary=f"Promoted miss {u} to catalog entry {added['name']}",
+                request=request,
+                subject_kind="catalog",
+                subject_id=added.get("name"),
+                details={"src": u, "via": "misses.fetch"},
+            )
+        _emit(
+            kind="catalog.entry.download.requested",
+            summary=f"Download requested for {u}",
+            request=request,
+            subject_kind="catalog",
+            subject_id=(added or {}).get("name") or u,
+            details={"src": u},
+        )
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/dismiss")
     def ui_admin_dismiss(
+        request: Request,
         key: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
         k = (key or "").strip()
         if k:
             app.state.store.dismiss(k)
+            _emit(
+                kind="blob.miss.dismissed",
+                summary="Dismissed recorded miss",
+                request=request,
+                subject_kind="blob",
+                subject_id=k,
+            )
         return RedirectResponse(url="/ui/misses", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/cancel_entry")
     def ui_admin_cancel_entry(
+        request: Request,
         name: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
         """Cancel the newest in-flight DownloadManager job for the
-        named catalog entry. No-op when the entry is unknown or
-        nothing is queued/running for its URL."""
+        named catalog entry."""
         cs: CatalogState = app.state.catalog
-        entry = next((e for e in cs.entries if e.get("name") == (name or "").strip()), None)
+        entry_name = (name or "").strip()
+        entry = next((e for e in cs.entries if e.get("name") == entry_name), None)
         if entry is not None:
             fetch_url = entry.get("resolved_src") or entry.get("src") or ""
             for job in app.state.mgr.list():
                 if job.url == fetch_url and job.status in ("queued", "running"):
                     app.state.mgr.cancel(job.id)
+                    _emit(
+                        kind="catalog.entry.download.cancelled",
+                        summary=f"Cancelled download of {entry_name}",
+                        request=request,
+                        subject_kind="catalog",
+                        subject_id=entry_name,
+                        details={"src": fetch_url, "job_id": job.id},
+                    )
                     break
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_refresh")
     def ui_admin_catalog_refresh(
+        request: Request,
         next: str = Form("catalog"),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
         """Re-fetch the currently-configured catalog source and
-        re-parse entries. Callers pass ``next=catalog|settings`` so
-        the 303 lands the operator back where they clicked."""
-        app.state.catalog.fetch_now()
+        re-parse entries."""
+        cs: CatalogState = app.state.catalog
+        cs.fetch_now()
+        if cs.last_error:
+            _emit(
+                kind="catalog.refresh.failed",
+                summary=f"Catalog refresh failed: {cs.last_error}",
+                request=request,
+                subject_kind="catalog",
+                details={"url": cs.url, "error": cs.last_error},
+            )
+        else:
+            _emit(
+                kind="catalog.refreshed",
+                summary=f"Catalog refreshed from {cs.url}",
+                request=request,
+                subject_kind="catalog",
+                details={"url": cs.url, "entries": len(cs.entries)},
+            )
         target = "/ui/settings" if (next or "").strip() == "settings" else "/ui/catalog"
         return RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_set_url")
     def ui_admin_catalog_set_url(
+        request: Request,
         url: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        """Persist an operator override for the catalog URL. Success
-        triggers an immediate fetch so the entries table reflects the
-        new source without a second click. Failure records the reason
-        on ``catalog.last_error`` and the Settings page surfaces it.
-        The form lives on ``/ui/settings`` since v0.12.0."""
+        """Persist an operator override for the catalog URL."""
         ok, msg = app.state.catalog.set_url_override(url or "")
         if ok:
             app.state.catalog.fetch_now()
+            _emit(
+                kind="catalog.source.updated",
+                summary=f"Catalog source URL set to {(url or '').strip() or '(cleared)'}",
+                request=request,
+                subject_kind="settings",
+                subject_id="catalog",
+                details={"url": (url or "").strip()},
+            )
         else:
             app.state.catalog.last_error = msg
         return RedirectResponse(url="/ui/settings", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_add_oras")
     def ui_admin_catalog_add_oras(
+        request: Request,
         url: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        app.state.catalog.add_oras_entry(url or "")
+        candidate = (url or "").strip()
+        ok, _msg = app.state.catalog.add_oras_entry(candidate)
+        if ok:
+            _emit(
+                kind="catalog.entry.added",
+                summary=f"Added ORAS entry {candidate}",
+                request=request,
+                subject_kind="catalog",
+                subject_id=candidate,
+                details={"src": candidate, "via": "catalog.add_oras"},
+            )
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_add_entry")
     def ui_admin_catalog_add_entry(
+        request: Request,
         url: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        """URL-only add-entry form for the Catalog subnav. Derives the
-        catalog name from the URL basename (with a numeric collision
-        suffix) and the ``format`` from a known compressor suffix
-        when present. Empty submits are refused with a
-        ``catalog.last_error`` note; other fields (sha256, arch,
-        size, description) stay unset until the operator hits
-        Download and the store row supplies size / hash. Same
-        promote-a-URL helper the Misses page's Fetch button uses,
-        minus the auto-download step.
-
-        For ``oras://`` sources use ``/admin/catalog_add_oras``
-        instead; the registry walk fills ``format`` + ``size``
-        from the manifest."""
+        """URL-only add-entry form for the Catalog subnav."""
         cs: CatalogState = app.state.catalog
         u = (url or "").strip()
         if not u:
@@ -767,33 +946,47 @@ def create_app(
             cs.last_error = f"catalog already has an entry for {u}"
         else:
             cs.last_error = ""
+            _emit(
+                kind="catalog.entry.added",
+                summary=f"Added HTTPS entry {added['name']}",
+                request=request,
+                subject_kind="catalog",
+                subject_id=added["name"],
+                details={"src": u, "via": "catalog.add_entry"},
+            )
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_delete_entry")
     def ui_admin_catalog_delete_entry(
+        request: Request,
         name: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        ok, msg = app.state.catalog.delete_entry(name or "")
+        target = (name or "").strip()
+        ok, msg = app.state.catalog.delete_entry(target)
         if not ok:
             app.state.catalog.last_error = msg
+        else:
+            _emit(
+                kind="catalog.entry.deleted",
+                summary=f"Deleted catalog entry {target}",
+                request=request,
+                subject_kind="catalog",
+                subject_id=target,
+            )
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/admin/catalog_download_entry")
     def ui_admin_catalog_download_entry(
+        request: Request,
         name: str = Form(""),
         force: str = Form(""),
         _auth_check: None = Depends(require_ui_auth),
     ) -> RedirectResponse:
-        """Form-encoded sibling of ``POST /catalog/entries/{name}/download``.
-
-        Adds an enqueue for the named entry; a truthy ``force`` field
-        drops any existing cached bytes first so the redownload
-        replaces stale content instead of hitting the dedup-on-active
-        branch in :class:`DownloadManager`.
-        """
+        """Form-encoded sibling of ``POST /catalog/entries/{name}/download``."""
         cs: CatalogState = app.state.catalog
-        entry = next((e for e in cs.entries if e.get("name") == (name or "").strip()), None)
+        target = (name or "").strip()
+        entry = next((e for e in cs.entries if e.get("name") == target), None)
         if entry is None:
             cs.last_error = f"no catalog entry with name={name!r}"
             return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
@@ -801,12 +994,25 @@ def create_app(
         if not fetch_url:
             cs.last_error = f"catalog entry {name!r} has no ``src`` / ``resolved_src`` to fetch"
             return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
-        if force.strip().lower() in ("1", "true", "on", "yes"):
+        forced = force.strip().lower() in ("1", "true", "on", "yes")
+        if forced:
             existing = app.state.store.get_blob(fetch_url)
             if existing is not None:
                 app.state.store.delete_blob(existing["key"])
         app.state.mgr.enqueue(fetch_url)
         cs.last_error = ""
+        _emit(
+            kind="catalog.entry.download.requested",
+            summary=(
+                f"Redownload requested for {target}"
+                if forced
+                else f"Download requested for {target}"
+            ),
+            request=request,
+            subject_kind="catalog",
+            subject_id=target,
+            details={"src": fetch_url, "force": forced},
+        )
         return RedirectResponse(url="/ui/catalog", status_code=status.HTTP_303_SEE_OTHER)
 
     return app

@@ -86,13 +86,14 @@ class DashboardPageTests(_PagesBase):
         self.assertIn("WITHCACHE", body)
         self.assertIn("brand-accent", body)
         self.assertIn("Catalog", body)
-        self.assertIn("Recent misses", body)
+        # Recent activity card replaces the old Recent misses card
+        self.assertIn("Recent activity", body)
         # Health check list has the label copy
         self.assertIn("Catalog source", body)
 
-    def test_dashboard_flags_no_recent_misses(self) -> None:
+    def test_dashboard_recent_events_empty_state(self) -> None:
         body = self.client.get("/ui/dashboard").text
-        self.assertIn("No recorded misses yet", body)
+        self.assertIn("No events yet", body)
 
 
 class MissesPageTests(_PagesBase):
