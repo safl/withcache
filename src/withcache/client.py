@@ -45,6 +45,7 @@ __all__ = [
     "cache_base",
     "delete_catalog_entry",
     "is_cached",
+    "is_healthy",
     "list_catalog",
     "serve_url",
 ]
@@ -119,6 +120,27 @@ def serve_url(
     without revisiting the origin).
     """
     return blob_url(server, origin) if is_cached(server, origin, timeout, headers=headers) else None
+
+
+def is_healthy(
+    server: str = "http://localhost:8081",
+    timeout: float = PROBE_TIMEOUT,
+) -> bool:
+    """True iff ``GET /healthz`` returns 200. Suitable for a startup
+    probe / reachability pill on a consumer's Settings page.
+
+    Bypasses :func:`_catalog_request` deliberately: the healthz body
+    is small JSON but we don't inspect it -- the status code is the
+    whole signal. Any transport / HTTP / OS failure returns
+    ``False`` so callers can treat a False as "not reachable" without
+    having to catch a family of exceptions.
+    """
+    url = f"{cache_base(server)}/healthz"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            return bool(resp.status == 200)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+        return False
 
 
 def _resolve_password(password: str | None) -> str | None:
