@@ -967,5 +967,71 @@ class TestHumanSize(unittest.TestCase):
         self.assertIn("GiB", server.human_size(3 * 1024 * 1024 * 1024))
 
 
+# --------------------------------------------------------------------------
+# client.is_healthy: GET /healthz reachability probe consumed by bty's
+# Settings pill so a red URL is caught at render time instead of on first
+# flash.
+# --------------------------------------------------------------------------
+class _HealthzOK(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/healthz":
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _HealthzFail(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(503)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestIsHealthy(unittest.TestCase):
+    def _serve(self, handler_cls):
+        httpd = socketserver.TCPServer(("127.0.0.1", 0), handler_cls)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        return httpd, port
+
+    def test_is_healthy_true_on_200(self):
+        from withcache import client
+
+        httpd, port = self._serve(_HealthzOK)
+        try:
+            self.assertTrue(client.is_healthy(f"http://127.0.0.1:{port}", timeout=2.0))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_is_healthy_false_on_non_2xx(self):
+        from withcache import client
+
+        httpd, port = self._serve(_HealthzFail)
+        try:
+            self.assertFalse(client.is_healthy(f"http://127.0.0.1:{port}", timeout=2.0))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_is_healthy_false_when_unreachable(self):
+        from withcache import client
+
+        # 127.0.0.1:1 -- reserved and closed on any sane host.
+        self.assertFalse(client.is_healthy("http://127.0.0.1:1", timeout=0.5))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
