@@ -45,14 +45,16 @@ disk.
 
 | Path                          | What it is                                                  |
 |-------------------------------|-------------------------------------------------------------|
-| `src/withcache/server.py`     | The cache-host: blob store + miss table + **background download manager** + operator UI (Bootstrap 5 + Bootstrap Icons + HTMX) |
+| `src/withcache/server.py`     | The cache-host: blob store + miss table + **background download manager** + events log |
+| `src/withcache/_app.py`       | FastAPI app factory + operator UI wiring (Bootstrap 5 + Bootstrap Icons + HTMX) |
 | `src/withcache/_shim.py`      | Shared shim core (find URL → probe → rewrite → exec)        |
 | `src/withcache/curlwithcache.py` / `wgetwithcache.py` | The Python `curl` / `wget` shims    |
 | `shim/shim.zig`               | The native shim: one static binary, both tools via `argv[0]` |
 | `deploy/Containerfile`, `deploy/compose.yml` | Single Podman/Docker host deploy             |
 
-The cache-host and the Python shims are **stdlib-only** (no third-party runtime
-deps); the native shim is a dependency-free static binary.
+The cache-host runs on FastAPI + Jinja + Bootstrap (matching bty +
+nbdmux for one trio-consistent chrome); the shims (Python and
+native) are dependency-free so they drop into any environment.
 
 ## Install
 
