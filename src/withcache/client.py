@@ -221,7 +221,10 @@ def add_catalog_entry(
 
     ``entry`` must carry at least ``name`` + ``src``. Optional
     fields: ``format``, ``arch``, ``sha256``, ``size_bytes``,
-    ``resolved_src``, ``description``.
+    ``resolved_src``, ``description``, ``netboot_ref`` (name of
+    a sibling entry carrying the matching nosi netboot bundle;
+    consumed by nbdmux to serve vmlinuz + initrd alongside the
+    disk-image export).
 
     Raises :class:`WithcacheError` on any HTTP failure (409 if the
     entry name already exists; 401 if auth is enabled and no valid

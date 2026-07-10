@@ -167,12 +167,28 @@ class AddCatalogEntryTests(_CatalogApiBase):
                 "sha256": "b" * 64,
                 "size_bytes": 2048,
                 "description": "Debian sysdev",
+                "netboot_ref": "debian-netboot",
             },
         )
         self.assertEqual(r.status_code, 201, r.text)
         stored = self.catalog.entries[0]
         self.assertEqual(stored["description"], "Debian sysdev")
         self.assertEqual(stored["resolved_src"], "https://example/debian.img.gz")
+        self.assertEqual(stored["netboot_ref"], "debian-netboot")
+
+    def test_netboot_ref_persists_through_toml_round_trip(self) -> None:
+        """netboot_ref must survive the catalog.toml write-then-reload."""
+        self.client.post(
+            "/catalog/entries",
+            json={
+                "name": "debian",
+                "src": "https://example/debian.img.gz",
+                "netboot_ref": "debian-netboot",
+            },
+        )
+        toml_path = os.path.join(self._tmpdir, "catalog.toml")
+        content = open(toml_path, encoding="utf-8").read()
+        self.assertIn('netboot_ref = "debian-netboot"', content)
 
     def test_add_persists_to_disk(self) -> None:
         self.client.post(
