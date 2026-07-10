@@ -256,9 +256,19 @@ def register_api_routes(app: FastAPI) -> None:
         """Insert one catalog entry.
 
         Body: ``{"name": "...", "src": "...", "format?", "arch?",
-        "sha256?", "size_bytes?", "resolved_src?", "description?"}``.
-        Only ``src`` is required; every other field is optional and
-        gets persisted through the ``catalog.toml`` round-trip.
+        "sha256?", "size_bytes?", "resolved_src?", "description?",
+        "netboot_ref?"}``. Only ``src`` is required; every other
+        field is optional and gets persisted through the
+        ``catalog.toml`` round-trip.
+
+        ``netboot_ref`` names another catalog entry (by ``name``)
+        whose bytes are a nosi netboot bundle (vmlinuz + initrd +
+        manifest) that nbdmux extracts at warm time so bty can
+        ramboot the image using its own kernel. Present iff the
+        entry is a disk image that has a matching netboot bundle;
+        the bundle entry itself never carries a ``netboot_ref``.
+        Withcache does not validate that the referenced entry
+        exists -- the sibling may be added in either order.
 
         409 when an entry with the same ``name`` already exists;
         rejecting on duplicate name (not src) because the display
@@ -278,6 +288,7 @@ def register_api_routes(app: FastAPI) -> None:
             "sha256",
             "size_bytes",
             "description",
+            "netboot_ref",
         }
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="body must be a JSON object")

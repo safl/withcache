@@ -147,18 +147,31 @@ def _serialise_catalog(entries: list[dict[str, Any]]) -> bytes:
     row can't smuggle arbitrary TOML through.
 
     Scalar keys emitted: ``name``, ``src``, ``resolved_src``,
-    ``format``, ``arch``, ``sha256``, ``description``. Integer:
-    ``size_bytes``. ``resolved_src`` is the canonical fetch URL
-    (for ``oras://`` refs; equal to ``src`` for plain HTTPS);
-    bty needs it to render iPXE flash chains against the byte
-    URL directly. ``description`` is operator-supplied prose so
-    the /ui/images page has something better than the URL to
-    display.
+    ``format``, ``arch``, ``sha256``, ``description``,
+    ``netboot_ref``. Integer: ``size_bytes``. ``resolved_src`` is
+    the canonical fetch URL (for ``oras://`` refs; equal to
+    ``src`` for plain HTTPS); bty needs it to render iPXE flash
+    chains against the byte URL directly. ``description`` is
+    operator-supplied prose so the /ui/images page has something
+    better than the URL to display. ``netboot_ref`` names a
+    sibling catalog entry carrying the matching nosi netboot
+    bundle (kernel + initrd) so nbdmux can pair the disk image
+    with its own kernel at warm time; see the ``add_catalog_entry``
+    docstring in ``_api.py`` for the pairing story.
     """
     out: list[str] = ["version = 1", ""]
     for e in entries:
         out.append("[[images]]")
-        for key in ("name", "src", "resolved_src", "format", "arch", "sha256", "description"):
+        for key in (
+            "name",
+            "src",
+            "resolved_src",
+            "format",
+            "arch",
+            "sha256",
+            "description",
+            "netboot_ref",
+        ):
             val = e.get(key)
             if val is None or val == "":
                 continue
