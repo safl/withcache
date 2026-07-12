@@ -234,9 +234,29 @@ def register_api_routes(app: FastAPI) -> None:
         entries_out: list[dict[str, Any]] = []
         for e in cs.entries:
             fetch_url = e.get("resolved_src") or e.get("src") or ""
-            if not fetch_url or store.get_blob(fetch_url) is None:
+            if not fetch_url:
                 continue
-            entries_out.append(dict(e))
+            blob = store.get_blob(fetch_url)
+            if blob is None:
+                continue
+            out = dict(e)
+            # Enrich with the downloaded blob's authoritative sha256 +
+            # size. The catalog TOML may or may not carry these (nosi's
+            # gen_catalog omits them at emit time because the blob
+            # digest isn't known until the artifact is packed); the
+            # blob store computed both during the actual download so
+            # the /catalog response is the right place to surface
+            # them. Bty consumes ``sha256`` to gate machine binds --
+            # without this enrichment a downloaded-but-unhashed entry
+            # can never satisfy bty's ``^[0-9a-f]{64}$`` ref check
+            # and the whole ramboot flow deadlocks.
+            blob_sha = blob["sha256"]
+            if isinstance(blob_sha, str) and blob_sha and not out.get("sha256"):
+                out["sha256"] = blob_sha
+            blob_size = blob["size"]
+            if isinstance(blob_size, int) and blob_size > 0 and not out.get("size_bytes"):
+                out["size_bytes"] = blob_size
+            entries_out.append(out)
         return JSONResponse(
             {
                 "url": cs.url,
