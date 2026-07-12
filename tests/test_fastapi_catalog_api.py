@@ -122,6 +122,63 @@ class ListCatalogTests(_CatalogApiBase):
         self.assertEqual(entries[0]["sha256"], "a" * 64)
         self.assertEqual(entries[0]["description"], "downloaded")
 
+    def test_list_enriches_sha256_and_size_from_blob_store(self) -> None:
+        """A catalog TOML entry whose bytes are downloaded but that
+        omits ``sha256`` / ``size_bytes`` (nosi's gen_catalog does
+        exactly this: the OCI blob digest and content-length aren't
+        knowable at TOML-emit time) must still surface those two
+        fields in ``GET /catalog`` -- withcache computed them during
+        the download and stashed them in the blob row.
+
+        Bty's ``bty_image_ref`` regex is ``^[0-9a-f]{64}$``; without
+        this enrichment a downloaded-but-not-hashed entry can never
+        satisfy the check and the ramboot machine bind 422s. Pin the
+        wire so a future regression fails the test suite instead of
+        the deploy.
+        """
+        self.catalog.entries = [
+            {
+                "name": "no-sha-in-toml",
+                "src": "https://example/toml-quiet.img.gz",
+                "format": "img.gz",
+                "resolved_src": "https://example/toml-quiet.img.gz",
+            }
+        ]
+        self._seed_store_row("https://example/toml-quiet.img.gz", "b" * 64)
+
+        r = self.client.get("/catalog")
+        self.assertEqual(r.status_code, 200)
+        entries = r.json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["sha256"], "b" * 64)
+        # ``_seed_store_row`` writes 1024-byte blob rows.
+        self.assertEqual(entries[0]["size_bytes"], 1024)
+
+    def test_list_does_not_overwrite_toml_provided_sha256(self) -> None:
+        """When the catalog TOML already carries ``sha256`` (e.g. a
+        future gen_catalog that emits it), the enrichment path must
+        not clobber the operator-declared value with the blob's
+        computed one. The TOML value wins. Same for ``size_bytes``.
+        """
+        toml_sha = "c" * 64
+        blob_sha = "d" * 64
+        self.catalog.entries = [
+            {
+                "name": "declared-sha",
+                "src": "https://example/declared.img.gz",
+                "format": "img.gz",
+                "sha256": toml_sha,
+                "size_bytes": 42,
+                "resolved_src": "https://example/declared.img.gz",
+            }
+        ]
+        self._seed_store_row("https://example/declared.img.gz", blob_sha)
+
+        r = self.client.get("/catalog")
+        entries = r.json()["entries"]
+        self.assertEqual(entries[0]["sha256"], toml_sha)
+        self.assertEqual(entries[0]["size_bytes"], 42)
+
     def _seed_store_row(self, url: str, sha256: str) -> None:
         """Insert a blobs row for ``url`` so ``store.get_blob`` returns
         it; skips the actual file write because ``list_catalog`` only
